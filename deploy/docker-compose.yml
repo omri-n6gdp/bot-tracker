@@ -1,0 +1,36 @@
+# Started by deploy/setup.sh. By hand, from the project folder:
+#   sudo docker compose -f deploy/docker-compose.yml up -d
+# HOST_UID / HOST_GID / TUNNEL_TOKEN come from deploy/.env, which setup.sh writes.
+services:
+  poller:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["python", "-m", "tracker", "poll"]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    env_file: ../.env
+    volumes:
+      - ..:/app:ro            # code, .env, API Keys and the deposits CSVs (read-only)
+      - ../data:/app/data     # the database: the only thing it writes
+    restart: unless-stopped
+    logging: { driver: local, options: { max-size: 10m } }
+
+  web:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["python", "-m", "tracker", "serve", "--host", "0.0.0.0", "--port", "8000", "--no-browser"]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    env_file: ../.env
+    volumes:                  # no API Keys here: the website never talks to Trading 212
+      - ../tracker:/app/tracker:ro
+      - ../web:/app/web:ro
+      - ../data:/app/data     # SQLite in WAL mode needs write access even to read
+    restart: unless-stopped
+    logging: { driver: local, options: { max-size: 10m } }
+    # no ports published: only the Cloudflare tunnel can reach it
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on: [web]
+    restart: unless-stopped
+    logging: { driver: local, options: { max-size: 10m } }

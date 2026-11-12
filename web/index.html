@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bot tracker</title>
+<meta name="theme-color" content="#0A0B0D">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/vendor/fonts/inter-tight-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/style.css?v=k5">
+<script src="/static/vendor/chart.umd.js" defer></script>
+<script src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js" defer></script>
+<script src="/static/surface.js?v=k5" defer></script>
+<script src="/static/app.js?v=k5" defer></script>
+</head>
+<body>
+<div class="aura" aria-hidden="true"><i></i><i></i></div>
+<div class="wrap">
+
+<header class="top">
+  <a class="brand" href="#overview"><i class="dot off" id="live-dot"></i><span id="pie-name">Bot tracker</span></a>
+  <nav class="nav" aria-label="Pages">
+    <a href="#overview" data-view="overview">Overview</a>
+    <a href="#holdings" data-view="holdings">Holdings</a>
+    <a href="#quant" data-view="quant">Quant</a>
+  </nav>
+  <form class="search" id="cmd" role="search" autocomplete="off">
+    <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M13 13l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg>
+    <label class="sr" for="cmd-in">Search for a stock</label>
+    <input id="cmd-in" type="text" spellcheck="false" placeholder="Search a stock" aria-autocomplete="list" aria-controls="cmd-list" aria-expanded="false">
+    <kbd aria-hidden="true">/</kbd>
+    <ul class="suggest" id="cmd-list" role="listbox" hidden></ul>
+  </form>
+  <button class="icon-btn" id="privacy" type="button" aria-pressed="false" title="Hide £ amounts">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.8"></path><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"></circle><path class="slash" d="M4 4l16 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>
+    <span class="sr">Hide £ amounts</span>
+  </button>
+  <p class="today" id="today"><span id="today-date"></span><span class="clock" id="clock"></span></p>
+</header>
+
+<div class="tape" id="tape" aria-label="Today's move for each holding"></div>
+<div class="notice" id="notice" role="status" hidden></div>
+
+<main>
+<!-- OVERVIEW -->
+<section id="view-overview" class="view" aria-label="Overview">
+  <div class="card waiting" id="waiting" hidden></div>
+  <section class="hero" data-money aria-label="Key statistics">
+    <div class="hero-main">
+      <p class="hero-label" id="hero-label">Value now</p>
+      <p class="hero-value" id="hero-value">&nbsp;</p>
+      <p class="hero-sub" id="hero-sub"></p>
+    </div>
+    <dl class="stats" id="stats"></dl>
+  </section>
+  <section class="chart-block" data-money aria-label="Performance">
+    <div class="chart-head">
+      <div class="legend" id="toggles"></div>
+      <div class="seg" id="ranges" role="group" aria-label="Time range">
+        <button data-range="1D" aria-pressed="false">1D</button><button data-range="1W" aria-pressed="false">1W</button><button data-range="1M" aria-pressed="false">1M</button><button data-range="3M" aria-pressed="false">3M</button><button data-range="YTD" aria-pressed="false">YTD</button><button data-range="ALL" aria-pressed="true">All</button>
+      </div>
+    </div>
+    <div class="canvas hero-chart"><canvas id="main-chart" role="img" aria-label="The bot's return over time, in percent"></canvas><span class="scrub-date" id="scrub-date" hidden></span><p class="empty chart-empty" id="chart-empty" hidden></p></div>
+  </section>
+  <div class="grid">
+    <section class="card s8" data-money>
+      <div class="h"><h2>The pie, mapped</h2>
+        <div class="seg" id="map-mode" role="group" aria-label="Colour by"><button data-map="day" aria-pressed="true">Today</button><button data-map="total" aria-pressed="false">Since bought</button><button data-map="analyst" aria-pressed="false">Analyst upside</button></div></div>
+      <div class="treemap" id="treemap"></div>
+    </section>
+    <section class="card s4" data-money>
+      <div class="h"><h2>Top movers today</h2><span class="meta" id="movers-meta"></span></div>
+      <div class="rows" id="movers"></div>
+    </section>
+    <section class="card s8">
+      <div class="h"><h2 id="news-title">Top news today</h2><span class="meta" id="news-meta"></span></div>
+      <ol class="headlines" id="news"></ol>
+    </section>
+    <section class="card s4">
+      <div class="h"><h2>What analysts think</h2><span class="meta" id="consensus-meta"></span></div>
+      <div class="fill" id="consensus"></div>
+    </section>
+  </div>
+</section>
+
+<!-- HOLDINGS -->
+<section id="view-holdings" class="view" aria-label="Holdings" hidden>
+  <div class="grid">
+    <section class="card s12">
+      <div class="h"><h2 id="hold-title">Holdings</h2><span class="meta" id="hold-meta"></span></div>
+      <div class="tbl-wrap"><table id="hold-table"></table></div>
+    </section>
+    <section class="card s6" data-money>
+      <div class="h"><h2>Gains and losses on what it holds</h2><span class="meta" id="contrib-meta"></span></div>
+      <div class="canvas grow bars18"><canvas id="contrib-chart" role="img" aria-label="Profit or loss from each holding"></canvas></div>
+    </section>
+    <section class="card s6">
+      <div class="h"><h2>Analyst price targets</h2><span class="meta">against the price now</span></div>
+      <div class="forest fill" id="forest"></div>
+    </section>
+    <section class="card s5" data-money>
+      <div class="h"><h2>Sectors</h2><span class="meta" id="sector-meta">click one to filter</span></div>
+      <div class="donut fill" id="sectors"></div>
+    </section>
+    <section class="card s7" data-money>
+      <div class="h"><h2>Weight against the bot's target</h2><span class="meta">percentage points over or under</span></div>
+      <div class="canvas grow"><canvas id="drift-chart" role="img" aria-label="How far each holding is from its target weight"></canvas></div>
+    </section>
+  </div>
+</section>
+
+<!-- QUANT -->
+<section id="view-quant" class="view" aria-label="Quant" hidden>
+  <div class="card" id="quant-wait" hidden></div>
+  <dl class="stats strip" id="quant-stats" data-stats></dl>
+  <div class="grid">
+    <section class="card s8 r2 vol-main">
+      <div class="h"><h2>Implied volatility surface</h2><label class="pick"><span class="sr">Stock</span><select id="vol-pick"></select></label></div>
+      <div class="surface" id="vol-surface"></div>
+    </section>
+    <section class="card s4 vol-side">
+      <div class="h"><h2>Smile</h2><span class="meta" id="smile-meta"></span></div>
+      <div class="chips" id="vol-expiries"></div>
+      <div class="canvas grow"><canvas id="smile-chart" role="img" aria-label="Implied volatility by strike for one expiry"></canvas></div>
+    </section>
+    <section class="card s4 vol-side">
+      <div class="h"><h2>Term structure</h2><span class="meta">at-the-money</span></div>
+      <div class="canvas grow"><canvas id="term-chart" role="img" aria-label="At-the-money implied volatility by expiry"></canvas></div>
+    </section>
+    <section class="card s12" data-stats>
+      <div class="h"><h2>Every trading day</h2><span class="meta" id="cal-meta"></span></div>
+      <div class="cal" id="calendar"></div>
+    </section>
+    <section class="card s6" data-stats>
+      <div class="h"><h2>Underwater</h2><span class="meta">fall from the last high</span></div>
+      <div class="canvas short"><canvas id="dd-chart" role="img" aria-label="Drawdown over time"></canvas></div>
+    </section>
+    <section class="card s6" data-stats>
+      <div class="h"><h2>Rolling 20-day return</h2><span class="meta" id="roll-meta"></span></div>
+      <div class="canvas short"><canvas id="roll-chart" role="img" aria-label="Rolling 20 trading day return"></canvas></div>
+    </section>
+    <section class="card s5 r2" data-stats>
+      <div class="h"><h2>How the holdings move together</h2><span class="meta" id="corr-meta"></span></div>
+      <div class="corr fill" id="corr"></div>
+    </section>
+    <section class="card s7" data-stats>
+      <div class="h"><h2>Daily returns</h2><span class="meta" id="hist-meta"></span></div>
+      <div class="canvas grow"><canvas id="hist-chart" role="img" aria-label="Histogram of daily returns against a normal curve"></canvas></div>
+    </section>
+    <section class="card s7" data-stats>
+      <div class="h"><h2>By month</h2><span class="meta">bot against the S&amp;P 500</span></div>
+      <div class="canvas grow"><canvas id="month-chart" role="img" aria-label="Monthly returns"></canvas></div>
+    </section>
+    <section class="card s8" data-stats>
+      <div class="h"><h2>The bot's moves</h2><span class="meta">return until the next move; click a bar</span></div>
+      <div class="canvas grow"><canvas id="moves-chart" role="img" aria-label="Return after each move, bot against the benchmark"></canvas></div>
+    </section>
+    <section class="card s4" data-stats>
+      <div class="h"><h2 id="move-title">Move</h2><span class="meta" id="move-meta"></span></div>
+      <div class="fill" id="move-detail"></div>
+    </section>
+    <section class="card s12" data-stats>
+      <div class="h"><h2>All the numbers</h2><span class="meta" id="risk-meta"></span></div>
+      <dl class="kv four" id="risk-kv"></dl>
+    </section>
+  </div>
+</section>
+
+<!-- STOCK -->
+<section id="view-stock" class="view" aria-label="Stock" hidden>
+  <section class="stock-head">
+    <div><h1 id="s-title">&nbsp;</h1><p class="tags" id="s-tags"></p></div>
+    <div class="px" id="s-price"></div>
+    <div class="pager"><a class="icon-btn" id="s-prev" href="#holdings" aria-label="Previous holding">‹</a><a class="icon-btn" id="s-next" href="#holdings" aria-label="Next holding">›</a></div>
+  </section>
+  <div class="grid">
+    <section class="card s8 r2">
+      <div class="h"><h2>Price</h2>
+        <div class="seg" id="s-ranges" role="group" aria-label="Time range"><button data-srange="30" aria-pressed="false">1M</button><button data-srange="91" aria-pressed="false">3M</button><button data-srange="182" aria-pressed="false">6M</button><button data-srange="365" aria-pressed="true">1Y</button><button data-srange="730" aria-pressed="false">2Y</button></div></div>
+      <div class="canvas grow tall"><canvas id="s-chart" role="img" aria-label="Share price with the bot's trades"></canvas></div>
+      <p class="legend foot"><span><i style="background: var(--up)"></i>bot bought</span><span><i style="background: var(--down)"></i>bot sold</span><span id="s-chart-meta"></span></p>
+    </section>
+    <section class="card s4" id="s-analyst-card">
+      <div class="h"><h2>Analysts</h2><span class="meta" id="s-analyst-meta"></span></div>
+      <div class="fill" id="s-analysts"></div>
+    </section>
+    <section class="card s4" id="s-position-card" data-money>
+      <div class="h"><h2>In the pie</h2></div>
+      <dl class="kv one" id="s-position"></dl>
+    </section>
+    <section class="card s8" id="s-vol-card">
+      <div class="h"><h2>Implied volatility surface</h2><span class="meta" id="s-vol-meta"></span></div>
+      <div class="surface" id="s-surface"></div>
+    </section>
+    <section class="card s4" id="s-stats-card">
+      <div class="h"><h2>Key numbers</h2></div>
+      <div class="groups" id="s-stats"></div>
+    </section>
+    <section class="card s4" data-money>
+      <div class="h"><h2>Weight in the pie</h2></div>
+      <div class="canvas grow"><canvas id="s-weight" role="img" aria-label="This stock's weight in the pie over time"></canvas></div>
+    </section>
+    <section class="card s4" id="s-trades-card" data-money>
+      <div class="h"><h2>The bot's trades</h2></div>
+      <div class="tbl-wrap scroll"><table id="s-trades"></table></div>
+    </section>
+    <section class="card s4" id="s-news-card">
+      <div class="h"><h2>News</h2></div>
+      <ol class="headlines scroll" id="s-news"></ol>
+    </section>
+  </div>
+</section>
+</main>
+
+<footer><span id="foot-name">Bot tracker</span><span id="foot-status"></span></footer>
+</div>
+<div class="peek" id="peek" hidden></div>
+</body>
+</html>

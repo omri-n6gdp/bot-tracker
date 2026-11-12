@@ -1,0 +1,24 @@
+# secrets: never commit these
+API Keys
+.env
+*.key
+# data
+data/
+*.db
+*.db-wal
+*.db-shm
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.hypothesis/
+
+data/logs/
+
+# Personal financial files + old junk (kept off GitHub)
+_to_delete/
+/*.csv
+*.db
+.DS_Store

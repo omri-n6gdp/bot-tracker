@@ -1,0 +1,23 @@
+#!/bin/bash
+# Bot Tracker: one click (re)starts the poller and the website in the background, then opens the site.
+# Lives inside the "Bot Tracker" folder; drag it to the Dock (the Dock keeps a link, the app stays here).
+
+HERE="$(cd "$(dirname "$0")/../../.." && pwd)"
+if [ -f "$HERE/tracker/__main__.py" ]; then DIR="$HERE"; else DIR="$HOME/Bot Tracker"; fi
+PY="$DIR/.venv/bin/python"
+
+alert() { /usr/bin/osascript -e "display alert \"Bot Tracker\" message \"$1\"" >/dev/null 2>&1; }
+notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Bot Tracker\"" >/dev/null 2>&1; }
+
+if [ ! -x "$PY" ]; then
+  alert "Can't find the Python set-up at $DIR/.venv. In Terminal, in that folder, run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+  exit 1
+fi
+cd "$DIR" || exit 1
+mkdir -p data/logs
+if "$PY" -m tracker restart >> data/logs/launcher.log 2>&1; then
+  notify "Running. The pie updates every minute while this Mac is awake."
+else
+  alert "The tracker didn't start. Details are in data/logs inside the Bot Tracker folder."
+  exit 1
+fi

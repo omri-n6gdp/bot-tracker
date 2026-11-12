@@ -1,0 +1,3 @@
+{ "name": "Bot tracker", "short_name": "Bot", "start_url": "/", "display": "standalone",
+  "background_color": "#E9EEF2", "theme_color": "#14213D",
+  "icons": [{ "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml" }] }
