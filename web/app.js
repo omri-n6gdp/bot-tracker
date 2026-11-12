@@ -343,7 +343,7 @@ function onScrub(i, px) {
   lab.style.left = `${clamp(px, 34, host.clientWidth - 34)}px`;
   state.counted = true;
   if (S.intraday) {
-    const r = S.early ? p.u / S.P[0].u - 1 : S.base ? p.value / S.base - 1 : null;
+    const r = p.u != null ? p.u / S.P[0].u - 1 : S.base ? p.value / S.base - 1 : null;
     $("#hero-label").textContent = S.early ? `${dShort(p.t)} at ${timeF.format(new Date(p.t))}` : `Today at ${timeF.format(new Date(p.t))}`;
     heroValue(p.value, r);
     $("#hero-sub").innerHTML = `<span class="delta ${cls(r)}">${arrow(r)} ${pct2(r)} since ${S.early ? "the start" : S.baseLabel}</span>`;
@@ -372,7 +372,7 @@ async function loadChart(animate = !state.chartShown) {
   note.textContent = h.intraday ? "Today's line appears once the tracker has a few minutes of prices." : "The chart starts after the first full day with money in the pie.";
   if (thin) { state.charts["main-chart"]?.destroy(); delete state.charts["main-chart"]; return; }
   if (h.intraday) {
-    const base = state.series.base, d = P.map((p) => ({ x: new Date(p.t).getTime(), y: h.early ? p.u / P[0].u - 1 : base ? p.value / base - 1 : 0 }));
+    const base = state.series.base, d = P.map((p) => ({ x: new Date(p.t).getTime(), y: p.u != null ? p.u / P[0].u - 1 : base ? p.value / base - 1 : 0 }));
     yFmt = pct2;
     datasets = [{ label: h.early ? "The bot" : "Today", data: d, borderColor: COL.amber, backgroundColor: areaFill(COL.amber), fill: "origin", borderWidth: 2.2, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, glow: true, tag: pct2 }];
     // the market over the same minutes, from the same starting point

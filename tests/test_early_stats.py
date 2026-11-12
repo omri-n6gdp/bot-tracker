@@ -74,7 +74,7 @@ def test_yahoo_closes_give_yesterdays_price(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path / 'y.db'}"
     S = make_session_factory(url)
     with S() as s:
-        snap = PieSnapshot(ts=datetime(2026, 11, 12, 15), value=79.2, holdings_value=79.2, cash=0.0)
+        snap = PieSnapshot(ts=datetime(2026, 11, 12, 13), value=79.2, holdings_value=79.2, cash=0.0)
         snap.holdings = [HoldingSnapshot(ticker="AAA_US_EQ", quantity=1.0, value=79.2)]
         s.add(snap)
         s.commit()
@@ -155,7 +155,7 @@ def test_yesterdays_bar_is_not_scaled_to_todays_price(tmp_path, monkeypatch):
     monkeypatch.setattr(market, "yahoo_symbol", lambda s, tk: "AAA")
     S = make_session_factory(f"sqlite:///{tmp_path / 'y2.db'}")
     with S() as s:
-        snap = PieSnapshot(ts=datetime(2026, 11, 12, 15), value=79.2, holdings_value=79.2, cash=0.0)
+        snap = PieSnapshot(ts=datetime(2026, 11, 12, 13), value=79.2, holdings_value=79.2, cash=0.0)
         snap.holdings = [HoldingSnapshot(ticker="AAA_US_EQ", quantity=1.0, value=79.2)]   # $99 today
         s.add(snap)
         s.commit()
@@ -187,3 +187,55 @@ def test_record_starts_at_the_new_york_open(tmp_path):
     assert r[0][0] == datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc)
     assert sm["started"].startswith("2026-11-12T14:30")
     assert h["points"][0]["t"].startswith("2026-11-12T14:30") and len(h["points"]) == 3
+
+
+def test_record_can_start_at_a_set_time(tmp_path):
+    S = _readings(tmp_path, [900 + i for i in range(30)])            # 14:30 .. 14:59
+    cfg = Settings(stale_after_s=10**9, bot_start_date="2026-11-12", bot_start_time="14:45")
+    with S() as s:
+        r = service.reading_series(s, cfg=cfg)
+        sm = service.summary(s, cfg)
+    assert r[0][0] == datetime(2026, 11, 12, 14, 45, tzinfo=timezone.utc)   # London = UTC in November
+    assert sm["started"].startswith("2026-11-12T14:45") and sm["since_open"]["from"].startswith("2026-11-12T14:45")
+
+
+def test_1d_chart_and_pill_ignore_money_paid_in_during_the_day(tmp_path):
+    # £500 at the open, then £400 more arrives at 14:35 and is invested; prices don't move
+    vals = [500.0] * 5 + [900.0] * 5
+    S = _readings(tmp_path, vals, cash=0.0, buys=[(5, 400.0)])
+    with S() as s:
+        h = service.history(s, Settings(stale_after_s=10**9), "1D")
+        o = service.summary(s, Settings(stale_after_s=10**9))["since_open"]
+    assert [round(p["u"] / h["points"][0]["u"] - 1, 6) for p in h["points"]] == [0.0] * 10
+    assert o["pct"] == pytest.approx(0.0) and o["gbp"] == pytest.approx(0.0)
+
+
+def test_each_stock_today_is_from_the_open(tmp_path):
+    url = f"sqlite:///{tmp_path / 'o.db'}"
+    S = make_session_factory(url)
+    with S() as s:
+        for ts, px in [(datetime(2026, 11, 12, 14, 0), 100.0), (datetime(2026, 11, 12, 14, 31), 104.0),
+                       (datetime(2026, 11, 12, 16, 0), 110.0)]:
+            snap = PieSnapshot(ts=ts, value=px, holdings_value=px, cash=0.0)
+            snap.holdings = [HoldingSnapshot(ticker="AAA_US_EQ", quantity=1.0, value=px)]
+            s.add(snap)
+        s.commit()
+        res = service.holdings(s, Settings(database_url=url))
+    assert res["day_from"] == "open" and res["holdings"][0]["day_pct"] == pytest.approx(110 / 104 - 1)
+
+
+def test_market_comparison_puts_money_in_when_it_arrived(tmp_path, monkeypatch):
+    from datetime import date as d_
+    from tracker import intraday
+    from tracker.db import Contribution
+    # S&P: 100 at the open, 110 by 14:35 when £400 arrives, 110 now
+    ser = [(datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc), 100.0),
+           (datetime(2026, 11, 12, 14, 35, tzinfo=timezone.utc), 110.0)]
+    monkeypatch.setattr(intraday, "gbp_series", lambda s, ticker: ser)
+    S = _readings(tmp_path, [500.0] * 5 + [900.0] * 5, cash=0.0, buys=[(5, 400.0)])
+    with S() as s:
+        s.add(Contribution(date=d_(2026, 11, 12), amount=900.0, note="all in"))
+        s.commit()
+        b = service.summary(s, Settings(stale_after_s=10**9, benchmarks=(("VUAG.L", "S&P 500"),)))["bench_on_deposits"]
+    # £500 at 100 -> 550; £400 at 110 -> 400: 950 on 900 paid in
+    assert b["VUAG.L"]["return"] == pytest.approx(950 / 900 - 1)
