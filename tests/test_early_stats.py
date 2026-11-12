@@ -118,7 +118,7 @@ def test_early_moves_and_blocks(tmp_path):
         s.commit()
         a = service.analysis_payload(s, Settings())
     assert a["moves"]["count"] == 1 and a["moves"]["windows"][0]["bot"] > 0
-    assert len(a["blocks"]) == 3 and all(b["r"] > 0 for b in a["blocks"])  # 14:30, 14:45, 15:00
+    assert len(a["series_min"]) == 40 and a["series_min"][-1][1] > a["series_min"][0][1]  # raw readings for any timeframe
     assert a["rolling20"]  # 20-reading rolling return
 
 
@@ -196,7 +196,8 @@ def test_record_can_start_at_a_set_time(tmp_path):
         r = service.reading_series(s, cfg=cfg)
         sm = service.summary(s, cfg)
     assert r[0][0] == datetime(2026, 11, 12, 14, 45, tzinfo=timezone.utc)   # London = UTC in November
-    assert sm["started"].startswith("2026-11-12T14:45") and sm["since_open"]["from"].startswith("2026-11-12T14:45")
+    assert sm["started"].startswith("2026-11-12T14:45")
+    assert sm["since_open"]["from"].startswith("2026-11-12T14:30")   # "today" still runs from the open
 
 
 def test_1d_chart_and_pill_ignore_money_paid_in_during_the_day(tmp_path):
@@ -239,3 +240,40 @@ def test_market_comparison_puts_money_in_when_it_arrived(tmp_path, monkeypatch):
         b = service.summary(s, Settings(stale_after_s=10**9, benchmarks=(("VUAG.L", "S&P 500"),)))["bench_on_deposits"]
     # £500 at 100 -> 550; £400 at 110 -> 400: 950 on 900 paid in
     assert b["VUAG.L"]["return"] == pytest.approx(950 / 900 - 1)
+
+
+def test_longer_charts_are_against_break_even(tmp_path):
+    from datetime import date as d_
+    from tracker.db import Contribution
+    S = _readings(tmp_path, [900.0, 909.0, 918.0], cash=20.0)          # £920 .. £938 with the cash
+    with S() as s:
+        s.add(Contribution(date=d_(2026, 11, 12), amount=950.0, note="in"))
+        s.commit()
+        h = service.history(s, Settings(stale_after_s=10**9), "ALL")
+    assert h["even"] and h["baseline_label"] == "Break-even (£950 paid in)"
+    assert [round(p["value"] / p["dep"] - 1, 4) for p in h["points"]] == [round(920 / 950 - 1, 4), round(929 / 950 - 1, 4), round(938 / 950 - 1, 4)]
+
+
+def test_stock_minute_prices_from_its_open(tmp_path, monkeypatch):
+    pts = [["2026-11-11T20:59:00+00:00", 173.0], ["2026-11-12T14:30:00+00:00", 150.0], ["2026-11-12T19:00:00+00:00", 165.0]]
+    monkeypatch.setattr(market, "yahoo_symbol", lambda s, tk: "AAA")
+    monkeypatch.setattr(market, "get", lambda s, kind, sym, allow_fetch=True: {"points": pts} if kind == "intraday" else None)
+    S = _readings(tmp_path, [900.0, 901.0])
+    with S() as s:
+        snap = service.latest_snapshot(s)
+        snap.holdings = [HoldingSnapshot(ticker="AAA_US_EQ", quantity=1.0, value=900.0)]
+        s.commit()
+        d = service.stock_intraday(s, Settings(), "AAA_US_EQ")
+        assert service.stock_intraday(s, Settings(), "NOPE_US_EQ") is None
+    assert d["session"] == "2026-11-12" and d["open"] == 150.0 and d["prev_close"] == 173.0 and len(d["points"]) == 2
+
+
+def test_break_even_charts_start_from_the_first_open(tmp_path):
+    from datetime import date as d_
+    from tracker.db import Contribution
+    S = _readings(tmp_path, [900.0, 901.0, 902.0], start=datetime(2026, 11, 12, 14, 45))
+    with S() as s:
+        s.add(Contribution(date=d_(2026, 11, 12), amount=950.0, note="in"))
+        s.commit()
+        h = service.history(s, Settings(stale_after_s=10**9), "ALL")
+    assert h["origin"] == "2026-11-12T14:30:00+00:00"   # 09:30 in New York

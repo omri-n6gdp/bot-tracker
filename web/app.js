@@ -77,6 +77,8 @@ const data = {
   game: () => get("/api/game"),          // never cached: guesses change it
   recap: () => load("recap", "/api/recap"),
   mc: () => load("mc", "/api/montecarlo"),
+  rr: () => load("rr", "/api/riskreturn"),
+  quant: () => load("quant", "/api/quant"),
 };
 const benchKey = (s) => Object.keys(s?.benchmarks || {})[0];
 const shortBench = (n) => ({ "S&P 500": "S&P", "FTSE All-World": "World" }[n] || n || "market");
@@ -251,9 +253,9 @@ async function refresh() {
   try {
     await loadSummary();
     const v = state.view, all = (ps) => Promise.all(ps.map((p) => p.catch(console.error)));
-    if (v === "overview") await all([loadHero(), loadChart(), loadMap(), loadNews(), loadConsensus(), loadGame(), loadRecap(), loadMC()]);
-    if (v === "holdings") await all([loadHoldings()]);
-    if (v === "quant") await all([loadQuant(), loadVol()]);
+    if (v === "overview") await all([loadHero(), loadChart(), loadMap(), loadNews(), loadConsensus(), loadGame(), loadRecap(), loadMC(), loadWaterfall()]);
+    if (v === "holdings") await all([loadHoldings(), loadRR()]);
+    if (v === "quant") await all([loadQuant(), loadVol(), loadDeep()]);
     if (v === "stock" && state.stock) await loadStock(state.stock);
   } catch (e) {
     console.error(e);
@@ -343,10 +345,10 @@ function onScrub(i, px) {
   lab.style.left = `${clamp(px, 34, host.clientWidth - 34)}px`;
   state.counted = true;
   if (S.intraday) {
-    const r = p.u != null ? p.u / S.P[0].u - 1 : S.base ? p.value / S.base - 1 : null;
+    const r = S.even && p.dep ? p.value / p.dep - 1 : p.u != null ? p.u / S.P[0].u - 1 : S.base ? p.value / S.base - 1 : null;
     $("#hero-label").textContent = S.early ? `${dShort(p.t)} at ${timeF.format(new Date(p.t))}` : `Today at ${timeF.format(new Date(p.t))}`;
     heroValue(p.value, r);
-    $("#hero-sub").innerHTML = `<span class="delta ${cls(r)}">${arrow(r)} ${pct2(r)} since ${S.early ? "the start" : S.baseLabel}</span>`;
+    $("#hero-sub").innerHTML = `<span class="delta ${cls(r)}">${arrow(r)} ${pct2(r)} ${S.even ? `on ${G(gbp0(p.dep))} paid in` : `since ${S.early ? "the start" : S.baseLabel}`}</span>`;
   } else {
     $("#hero-label").textContent = dLong(p.t);
     heroValue(p.value, p.pie);
@@ -363,31 +365,37 @@ async function loadChart(animate = !state.chartShown) {
   const chips = state.bench.filter((b) => !h.intraday || h.benchmarks?.some((x) => x.key === b.key))
     .map((b) => `<button class="chip" data-bench="${esc(b.key)}" aria-pressed="${b.on}"><i style="background:${bc[state.bench.indexOf(b) % 2]}"></i>${esc(b.name)}</button>`).join("");
   box.innerHTML = `<span><i style="background:${COL.amber}"></i>The bot</span>` + chips + (h.intraday ? `<span><i style="background:${COL.faint}"></i>${esc(h.baseline_label || "Yesterday's close")}</span>`
-    : `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`);
+    : (h.has_deposits ? `<span><i style="background:${COL.faint}"></i>Break-even</span>` : "") + `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`);
   $$("[data-bench]", box).forEach((el) => el.addEventListener("click", () => { const b = state.bench.find((x) => x.key === el.dataset.bench); b.on = !b.on; loadChart(false); }));
   let datasets, yFmt;
-  state.series = { P, intraday: !!h.intraday, early: !!h.early, base: h.baseline || P[0]?.value, baseLabel: (h.baseline_label || "Yesterday's close").toLowerCase() };
+  state.series = { P, intraday: !!h.intraday, early: !!h.early, even: !!h.even || (!h.intraday && !!h.has_deposits), base: h.baseline || P[0]?.value, baseLabel: (h.baseline_label || "Yesterday's close").toLowerCase() };
   const thin = P.length < 2, note = $("#chart-empty");
   note.hidden = !thin;
   note.textContent = h.intraday ? "Today's line appears once the tracker has a few minutes of prices." : "The chart starts after the first full day with money in the pie.";
   if (thin) { state.charts["main-chart"]?.destroy(); delete state.charts["main-chart"]; return; }
   if (h.intraday) {
-    const base = state.series.base, d = P.map((p) => ({ x: new Date(p.t).getTime(), y: p.u != null ? p.u / P[0].u - 1 : base ? p.value / base - 1 : 0 }));
+    const base = state.series.base, d = P.map((p) => ({ x: new Date(p.t).getTime(), y: h.even && p.dep ? p.value / p.dep - 1 : p.u != null ? p.u / P[0].u - 1 : base ? p.value / base - 1 : 0 }));
     yFmt = pct2;
     datasets = [{ label: h.early ? "The bot" : "Today", data: d, borderColor: COL.amber, backgroundColor: areaFill(COL.amber), fill: "origin", borderWidth: 2.2, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, glow: true, tag: pct2 }];
     // the market over the same minutes, from the same starting point
     state.bench.forEach((b, i) => { const hb = b.on && h.benchmarks?.find((x) => x.key === b.key); if (hb?.points?.length) datasets.push({ label: b.name, data: hb.points.map((p) => ({ x: new Date(p.t).getTime(), y: p.pct })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, order: 2, tag: pct2 }); });
-    if (d.length) datasets.push({ label: h.baseline_label || "Yesterday's close", data: [{ x: d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
+    // where the money started: break-even, straight down (or up) to the bot's first reading
+    if (h.origin && d.length) datasets.push({ label: "Start", data: [{ x: d[0].x, y: 0 }, d[0]], borderColor: COL.amber, borderWidth: 2.2, pointRadius: [3.5, 0], pointBackgroundColor: COL.amber, pointHoverRadius: 0, noScrub: true, order: 1 });
+    if (d.length) datasets.push({ label: h.baseline_label || "Yesterday's close", data: [{ x: h.session && !h.early ? new Date(h.session.open).getTime() : d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
   } else {
-    const main = P.map((p) => ({ x: tms(p.t), y: p.pie }));
+    const ev = !!h.has_deposits;   // 0% = break-even: worth what's been paid in
+    const main = P.map((p) => ({ x: tms(p.t), y: ev && p.deposits ? p.value / p.deposits - 1 : p.pie }));
     yFmt = pct;
     datasets = [{ label: "The bot", data: main, borderColor: COL.amber, backgroundColor: areaFill(COL.amber), fill: "origin", borderWidth: 2.4, pointRadius: 0, pointHoverRadius: 0, tension: 0.15, order: 1, glow: true, tag: pct }];
-    state.bench.forEach((b, i) => { if (b.on) datasets.push({ label: b.name, data: P.filter((p) => p.bench?.[b.key] != null).map((p) => ({ x: tms(p.t), y: p.bench[b.key] })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.15, order: 2, tag: pct }); });
+    state.bench.forEach((b, i) => { if (b.on) datasets.push({ label: b.name, data: P.filter((p) => (ev ? p.bench_value?.[b.key] : p.bench?.[b.key]) != null).map((p) => ({ x: tms(p.t), y: ev && p.deposits ? p.bench_value[b.key] / p.deposits - 1 : p.bench[b.key] })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.15, order: 2, tag: pct }); });
+    if (ev && h.origin && main.length) datasets.push({ label: "Start", data: [{ x: main[0].x, y: 0 }, main[0]], borderColor: COL.amber, borderWidth: 2.4, pointRadius: [3.5, 0], pointBackgroundColor: COL.amber, pointHoverRadius: 0, noScrub: true, order: 1 });
     const first = main[0]?.x ?? 0;
     datasets.push({ label: "Move", type: "scatter", order: 0, pointStyle: "rectRounded", pointRadius: 3.5, pointHoverRadius: 3.5, backgroundColor: COL.amber, borderColor: COL.bg, borderWidth: 1.5,
       data: reb.filter((r) => new Date(r.ts).getTime() >= first - 864e5).map((r) => { const x = new Date(r.ts).getTime(), pt = main[nearest(main, x)]; return { x, y: pt?.y }; }).filter((p) => p.y != null) });
   }
   const o = timeOpts(yFmt, { intraday: h.intraday, tags: true, tooltip: false });
+  // 1D: the whole New York session across the chart, like a live day chart
+  if (h.session && !h.early) o.scales.x.min = new Date(h.session.open).getTime();
   o.plugins.scrub = { onMove: onScrub };
   o.events = ["mousemove", "mouseout", "touchstart", "touchmove", "touchend"];
   const ch = chart("main-chart", { type: "line", data: { datasets }, options: o });
@@ -564,9 +572,172 @@ async function loadHoldings() {
   const drift = on.filter((h) => !bad(h.target)).map((h) => ({ ...h, d: (h.weight - h.target) * 100 })).sort((a, b) => b.d - a.d);
   chart("drift-chart", { type: "bar", data: { labels: drift.map((h) => h.symbol), datasets: [{ data: drift.map((h) => h.d), backgroundColor: drift.map((h) => (Math.abs(h.d) >= 1.5 ? COL.amber : "rgba(237,235,230,.45)")), borderRadius: 4, maxBarThickness: 22 }] },
     options: barOpts({ onClick: go(drift), onHover: hover, plugins: { legend: { display: false }, tooltip: { callbacks: { title: (it) => drift[it[0].dataIndex].name, label: (it) => ` ${pp(drift[it.dataIndex].weight)} now against a ${pp(drift[it.dataIndex].target)} target` } } },
-      scales: { y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => `${v > 0 ? "+" : ""}${v}` } }, x: { grid: { display: false }, border: { display: false }, ticks: { autoSkip: false, maxRotation: 0, color: COL.fg, font: { family: "'JetBrains Mono', monospace", size: 10.5, weight: 700 } } } } }) });
+      scales: { y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => `${v > 0 ? "+" : ""}${+v.toFixed(2)}` } }, x: { grid: { display: false }, border: { display: false }, ticks: { autoSkip: false, maxRotation: 0, color: COL.fg, font: { family: "'JetBrains Mono', monospace", size: 10.5, weight: 700 } } } } }) });
 }
 $("#hold-table").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-go]"); if (tr && !e.target.closest("a, button")) location.hash = tr.dataset.go.slice(1); });
+
+/* ================= deeper analysis (Quant page) ================= */
+state.deepSrc = { rb: "mix", acf: "pie" };
+const segSrc = (sel, v) => $$(`${sel} button`).forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.src === v)));
+const mean_ = (x) => x.reduce((s, v) => s + v, 0) / x.length;
+function pieMinuteReturns() {
+  const S = state.deepA?.series_min || [], out = [];
+  for (let i = 1; i < S.length; i++) if (new Date(S[i][0]) - new Date(S[i - 1][0]) < 600e3) out.push(S[i][1] / S[i - 1][1] - 1);
+  return out;   // within a session only: the night's gap isn't a minute's move
+}
+const deepReturns = (src) => (src === "pie" ? pieMinuteReturns() : (state.deep?.mix_returns || []).map((x) => x[1]));
+const mixNote = () => `Today's mix: today's weights held through the past year (${state.deep?.days || "?"} trading days to ${state.deep?.to ? dShort(state.deep.to) : "now"}).`;
+async function loadDeep() {
+  const [q, a] = await Promise.all([data.quant(), data.analysis()]);
+  state.deep = q; state.deepA = a;
+  for (const f of [drawRolling, drawFactors, drawOptions, drawACF]) { try { f(); } catch (e) { console.error(e); } }
+}
+
+function drawRolling() {
+  const q = state.deep, src = state.deepSrc.rb; segSrc("#rb-src", src);
+  const R = (src === "pie" ? q.pie_rolling : q.rolling) || [];
+  if (R.length < 3) { $("#rb-meta").textContent = ""; chartNote("rb-chart", src === "pie" ? "Needs about half an hour of readings." : "Needs a few months of prices."); return; }
+  chartNote("rb-chart", null);
+  const L = R.at(-1), xs = R.map((r) => new Date(r.t).getTime());
+  $("#rb-meta").innerHTML = (src === "pie" ? `This pie against the S&P, over a moving ${q.pie_window} readings (about ${q.pie_window} minutes).` : `${mixNote()} Against the S&P over a moving three months.`)
+    + ` Beta now <b>${n2(L.beta)}</b> (95% range ${n2(L.lo)} to ${n2(L.hi)}): when the S&P moves 1%, the pie has moved about ${n2(L.beta)}%. Alpha, a year at this pace: <b class="${cls(L.alpha)}">${pct(L.alpha)}</b>`
+    + warn(src === "pie" ? "From minute readings over a very short time: alpha especially is scaled up from minutes to a year and means very little yet." : null);
+  const o = timeOpts((v) => n2(v), { intraday: src === "pie" });
+  o.scales.y.position = "left";
+  o.scales.y2 = { position: "right", grid: { display: false }, border: { display: false }, ticks: { callback: (v) => pct(v), maxTicksLimit: 6 } };
+  o.plugins.tooltip.filter = (it) => !it.dataset.band;
+  o.plugins.tooltip.callbacks.label = (it) => ` ${it.dataset.label}: ${it.dataset.yAxisID === "y2" ? pct(it.raw.y) : n2(it.raw.y)}`;
+  chart("rb-chart", { type: "line", data: { datasets: [
+    { label: "low", data: R.map((r, i) => ({ x: xs[i], y: r.lo })), borderWidth: 0, pointRadius: 0, fill: false, band: true, yAxisID: "y" },
+    { label: "high", data: R.map((r, i) => ({ x: xs[i], y: r.hi })), borderWidth: 0, pointRadius: 0, fill: "-1", backgroundColor: "rgba(92,200,255,.16)", band: true, yAxisID: "y" },
+    { label: "Beta", data: R.map((r, i) => ({ x: xs[i], y: r.beta })), borderColor: COL.blue, borderWidth: 2, pointRadius: 0, yAxisID: "y" },
+    { label: "Alpha, a year", data: R.map((r, i) => ({ x: xs[i], y: r.alpha })), borderColor: COL.amber, borderWidth: 1.4, borderDash: [5, 4], pointRadius: 0, yAxisID: "y2" },
+    { label: "Beta of 1", data: [{ x: xs[0], y: 1 }, { x: xs.at(-1), y: 1 }], borderColor: COL.faint, borderDash: [3, 4], borderWidth: 1, pointRadius: 0, band: true, yAxisID: "y" },
+  ] }, options: o });
+}
+
+function drawFactors() {
+  const f = state.deep?.factors;
+  if (!f) { chartNote("fx-chart", "Needs a few months of prices for the style funds."); return; }
+  chartNote("fx-chart", null);
+  const F = f.factors, sig = (x) => x.lo > 0 || x.hi < 0;
+  $("#fx-meta").textContent = `explains ${p0(f.r2)} of its daily moves`;
+  $("#fx-sub").innerHTML = `${mixNote()} Each bar: how much the mix moves with that style, with its 95% range. Coloured when the range doesn't include zero. What's left over (alpha): <b class="${cls(f.alpha)}">${pct(f.alpha)}</b> a year (range ${pct(f.alpha_lo)} to ${pct(f.alpha_hi)}).`;
+  const col = (x) => (!sig(x) ? "rgba(237,235,230,.25)" : x.beta > 0 ? COL.up : COL.down);
+  chart("fx-chart", { type: "bar", data: { labels: F.map((x) => x.name), datasets: [
+    { label: "95% range", data: F.map((x) => [x.lo, x.hi]), backgroundColor: F.map((x) => col(x) + (sig(x) ? "55" : "")), borderRadius: 3, barPercentage: 0.5, grouped: false, order: 2 },
+    { label: "Exposure", data: F.map((x) => [x.beta - 0.012, x.beta + 0.012]), backgroundColor: F.map(col), barPercentage: 0.9, grouped: false, order: 1 },
+  ] }, options: barOpts({ indexAxis: "y", plugins: { legend: { display: false }, tooltip: { callbacks: {
+      title: (it) => `${F[it[0].dataIndex].name}: ${F[it[0].dataIndex].about}`,
+      label: (it) => { const x = F[it.dataIndex]; return it.datasetIndex ? ` Exposure ${n2s(x.beta)} (t ${n2(x.t)})` : ` 95% range ${n2s(x.lo)} to ${n2s(x.hi)}`; } } } },
+    scales: { x: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => n2s(v) } }, y: { grid: { display: false }, border: { display: false }, ticks: { color: COL.fg } } } }) });
+}
+
+function drawOptions() {
+  const o = state.deep?.options, S = o?.stocks || [];
+  if (S.length < 2) { chartNote("opt-chart", "Waiting for option prices for the US holdings."); return; }
+  chartNote("opt-chart", null);
+  const top = Math.max(...S.flatMap((x) => [x.iv, x.rv]), o.pie?.iv || 0, o.pie?.rv || 0) * 1.08;
+  $("#opt-meta").textContent = `${S.length} stocks with options`;
+  $("#opt-sub").innerHTML = `Across: how much each stock actually moved over the last month (as a yearly volatility). Up: how much its options expect it to move over the next month. Above the line, the options price in more fear than recent reality; below, more calm.`
+    + (o.pie?.iv ? ` The whole mix: options expect <b>${pct(o.pie.iv).replace("+", "")}</b>, it has been moving <b>${pct(o.pie.rv).replace("+", "")}</b>.` : "");
+  chart("opt-chart", { type: "scatter", data: { datasets: [
+    { label: "Same", type: "line", data: [{ x: 0, y: 0 }, { x: top, y: top }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1, pointRadius: 0 },
+    { type: "bubble", label: "Stocks", data: S.map((x) => ({ x: x.rv, y: x.iv, r: 4 + Math.sqrt(x.weight) * 30, s: x })), backgroundColor: S.map((x) => (x.iv > x.rv ? "rgba(255,107,107,.55)" : "rgba(61,220,151,.55)")), borderColor: S.map((x) => (x.iv > x.rv ? COL.down : COL.up)), borderWidth: 1 },
+    ...(o.pie?.iv ? [{ label: "The whole mix", data: [{ x: o.pie.rv, y: o.pie.iv }], pointStyle: "rectRot", pointRadius: 9, backgroundColor: COL.amber, borderColor: COL.bg, borderWidth: 2 }] : []),
+  ] }, options: { responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: { legend: { display: false }, tooltip: { filter: (it) => it.dataset.label !== "Same", callbacks: {
+      title: (it) => it[0].raw.s ? it[0].raw.s.symbol : it[0].dataset.label,
+      label: (it) => [` Options expect ${pct(it.raw.y).replace("+", "")}`, ` It has moved ${pct(it.raw.x).replace("+", "")}`, ` ${it.raw.y > it.raw.x ? "More fear than reality" : "Calmer than reality"}`] } } },
+    scales: { x: { min: 0, max: top, title: { display: true, text: "moved, last month", color: COL.faint }, grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => p0(v) } },
+      y: { min: 0, max: top, title: { display: true, text: "options expect", color: COL.faint }, grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => p0(v) } } } } });
+}
+
+function drawACF() {
+  const src = state.deepSrc.acf; segSrc("#acf-src", src);
+  const r = deepReturns(src);
+  if (r.length < 40) { $("#acf-meta").textContent = ""; chartNote("acf-chart", "Not enough returns yet."); return; }
+  chartNote("acf-chart", null);
+  const K = 20, n = r.length, acf = (x) => { const m = mean_(x), d = x.map((v) => v - m), den = d.reduce((s, v) => s + v * v, 0) || 1e-12; return Array.from({ length: K }, (_, k) => d.slice(k + 1).reduce((s, v, i) => s + v * d[i], 0) / den); };
+  const a1 = acf(r), a2 = acf(r.map((v) => v * v)), band = 1.96 / Math.sqrt(n), out = (a) => a.filter((v) => Math.abs(v) > band).length;
+  const unit = src === "pie" ? "minute" : "day";
+  $("#acf-meta").innerHTML = `How much a ${unit}'s move is echoed 1 to ${K} ${unit}s later. Amber: the moves themselves (outside the band = some pattern to the direction). Blue: the size of the moves (squared): outside the band means calm and wild spells come in bunches. Outside the 95% band: <b>${out(a1)}</b> of ${K} for moves, <b>${out(a2)}</b> of ${K} for sizes (about 1 would happen by chance).`
+    + (src === "mix" ? ` ${mixNote()}` : "");
+  chart("acf-chart", { data: { labels: Array.from({ length: K }, (_, k) => `${k + 1}`), datasets: [
+    { type: "line", label: "95% band", data: Array(K).fill(band), borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1, pointRadius: 0 },
+    { type: "line", label: "95% band ", data: Array(K).fill(-band), borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1, pointRadius: 0 },
+    { type: "bar", label: "Moves", data: a1, backgroundColor: a1.map((v) => (Math.abs(v) > band ? COL.amber : "rgba(255,176,32,.35)")), borderRadius: 2, barPercentage: 0.9, categoryPercentage: 0.7 },
+    { type: "bar", label: "Sizes of moves", data: a2, backgroundColor: a2.map((v) => (Math.abs(v) > band ? COL.blue : "rgba(92,200,255,.35)")), borderRadius: 2, barPercentage: 0.9, categoryPercentage: 0.7 },
+  ] }, options: barOpts({ plugins: { legend: { display: false }, tooltip: { mode: "index", intersect: false, filter: (it) => it.dataset.type === "bar", callbacks: { title: (it) => `${it[0].label} ${unit}${it[0].label === "1" ? "" : "s"} later`, label: (it) => ` ${it.dataset.label}: ${n2s(it.raw)}` } } },
+    scales: { x: { title: { display: true, text: `lag (${unit}s)`, color: COL.faint }, grid: { display: false }, border: { display: false } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => n2s(v), maxTicksLimit: 6 } } } }) });
+}
+for (const [sel, key, fn] of [["#rb-src", "rb", () => drawRolling()], ["#acf-src", "acf", () => drawACF()]])
+  $$(`${sel} button`).forEach((b) => b.addEventListener("click", () => { state.deepSrc[key] = b.dataset.src; fn(); }));
+
+/* ================= risk against reward ================= */
+state.rrN = "63";
+async function loadRR() {
+  const d = await data.rr(), n = state.rrN, lab = { 21: "month", 63: "three months", 252: "year" }[n];
+  $$("#rr-window button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.rr === n)));
+  const S = (d.stocks || []).filter((x) => x[n]), pie = d.pie?.[n], B = (d.benchmarks || []).filter((x) => x[n]);
+  if (!S.length) { chartNote("rr-chart", "Needs a few weeks of daily prices for each stock."); return; }
+  chartNote("rr-chart", null);
+  const secs = [...new Set(S.map((x) => x.sector))].sort(), sc = (sname) => SECTOR_COLOURS[secs.indexOf(sname) % SECTOR_COLOURS.length];
+  const xmax = Math.max(...S.map((x) => x[n].swing), pie?.swing || 0, ...B.map((b) => b[n].swing)) * 1.08;
+  const ratios = [-1, 0.5, 1, 2];   // return per unit of swing: the dashed guides
+  const yTop = Math.max(...S.map((x) => x[n].ret), pie?.ret ?? 0, ...B.map((b) => b[n].ret), 0.02) * 1.1, yBot = Math.min(...S.map((x) => x[n].ret), pie?.ret ?? 0, ...B.map((b) => b[n].ret), -0.02) * 1.1;
+  const xEnd = (k) => Math.min(xmax, (k > 0 ? yTop : yBot) / k);   // stop each guide at the edge of the data
+  const guides = ratios.map((k) => ({ type: "line", label: `return = ${k}× swing`, data: [{ x: 0, y: 0 }, { x: xEnd(k), y: k * xEnd(k) }], borderColor: "rgba(237,235,230,.16)", borderDash: [3, 5], borderWidth: 1, pointRadius: 0, order: 9, guide: k }));
+  const r = (w) => 5 + Math.sqrt(w) * 34;
+  const pts = S.map((x) => ({ x: x[n].swing, y: x[n].ret, r: r(x.weight), item: x }));
+  $("#rr-meta").innerHTML = `over the last ${lab}: return (up) against how much it swung (across: the spread of daily moves, scaled to the ${lab}). Bubbles are sized by weight, coloured by sector; dashed lines join points with the same return per unit of swing.`
+    + (pie ? ` Today's mix: <b class="${cls(pie.ret)}">${pct(pie.ret)}</b> for ${pct(pie.swing).replace("+", "")} of swing.` : "");
+  chart("rr-chart", { data: { datasets: [
+      ...guides,
+      { type: "bubble", label: "Stocks", data: pts, backgroundColor: pts.map((p) => sc(p.item.sector) + "B3"), borderColor: pts.map((p) => sc(p.item.sector)), borderWidth: 1, order: 2 },
+      ...(pie ? [{ type: "scatter", label: "Today's mix", data: [{ x: pie.swing, y: pie.ret }], pointStyle: "rectRot", pointRadius: 9, pointHoverRadius: 11, backgroundColor: COL.amber, borderColor: COL.bg, borderWidth: 2, order: 1 }] : []),
+      ...B.map((b, i) => ({ type: "scatter", label: b.name, data: [{ x: b[n].swing, y: b[n].ret }], pointStyle: "rect", pointRadius: 7, pointHoverRadius: 9, backgroundColor: i ? COL.grey : COL.blue, borderColor: COL.bg, borderWidth: 2, order: 1 })),
+    ] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false,
+      onClick: (e, els) => { const el = els.find((x) => x.element && e.chart.data.datasets[x.datasetIndex].label === "Stocks"); if (el) location.hash = stockHref(pts[el.index].item.ticker).slice(1); },
+      plugins: { legend: { display: false }, tooltip: { filter: (it) => it.dataset.guide == null, callbacks: {
+        title: (it) => (it[0].dataset.label === "Stocks" ? `${pts[it[0].dataIndex].item.symbol}  ${pts[it[0].dataIndex].item.name}` : it[0].dataset.label),
+        label: (it) => { const x = it.raw.x, y = it.raw.y; return [` Return ${pct(y)}`, ` Swing ${pct(x).replace("+", "")}`, ` Return per unit of swing ${n2(y / x)}`].concat(it.dataset.label === "Stocks" ? [` ${pp(pts[it.dataIndex].item.weight)} of the pie, ${pts[it.dataIndex].item.sector}`] : []); } } } },
+      scales: { x: { type: "linear", min: 0, grid: { color: COL.hair }, border: { display: false }, title: { display: true, text: "swing", color: COL.faint }, ticks: { callback: (v) => pct(v).replace("+", ""), maxTicksLimit: 7 } },
+        y: { grace: "6%", grid: { color: COL.hair }, border: { display: false }, title: { display: true, text: "return", color: COL.faint }, ticks: { callback: (v) => pct(v), maxTicksLimit: 7 } } } } });
+}
+$$("#rr-window button").forEach((b) => b.addEventListener("click", () => { state.rrN = b.dataset.rr; loadRR(); }));
+
+/* ================= waterfall: what moved the pie ================= */
+state.wf = "day";
+async function loadWaterfall() {
+  const s = state.summary, hs = held(), cash = state.holdingsData?.cash || 0;
+  if (!s?.ready || !hs.length) return;
+  const day = state.wf === "day", o = s.since_open;
+  $$("#wf-mode button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.wf === state.wf)));
+  $("#wf-title").textContent = day ? "What moved the pie today" : "What moved the pie since it bought";
+  // each stock's £ change; "everything else" closes the gap to the pie's real change
+  // (today: buying and selling during the day, costs, cash; since bought: cash, costs, sold stocks)
+  const total = day ? (o ? o.gbp : s.day_change) : s.profit;
+  if (bad(total)) { chartNote("wf-chart", "Not enough data yet."); return; }
+  chartNote("wf-chart", null);
+  let items = hs.map((h) => ({ k: h.symbol, tk: h.ticker, v: day ? h.day_gbp : h.pl })).filter((x) => !bad(x.v)).sort((a, b) => b.v - a.v);
+  if (items.length > 16) { const keep = [...items.slice(0, 8), ...items.slice(-7)], rest = items.slice(8, -7); items = [...keep.slice(0, 8), { k: `${rest.length} others`, v: rest.reduce((x, y) => x + y.v, 0) }, ...keep.slice(8)]; }
+  const other = total - items.reduce((x, y) => x + y.v, 0);
+  if (Math.abs(other) >= 0.01) items.push({ k: day ? "Trading, cash" : "Cash, costs", v: other, other: true });
+  const base = s.value - total, scale = state.private ? (x) => x / base : (x) => x;   // eye button: points instead of £
+  let run = 0;
+  const bars = [{ k: day ? "Open" : "Paid in", y: [0, 0], start: true }, ...items.map((x) => { const a = run; run += x.v; return { ...x, y: [scale(a), scale(run)] }; }), { k: "Now", y: [0, scale(total)], end: true }];
+  const col = (b) => (b.start ? COL.faint : b.end ? COL.amber : b.other ? COL.grey : b.v >= 0 ? COL.up : COL.down);
+  const fmt = (x) => (state.private ? pts(x) : gbpS(x));
+  $("#wf-meta").innerHTML = `${day ? (o ? `from ${timeF.format(new Date(o.from))} today` : "today") : `against ${G(gbp0(s.net_deposits))} paid in`}: <b class="${cls(total)}">${G(gbpS(total))}</b> · best ${esc(items[0]?.k || "")}, worst ${esc(items.filter((x) => !x.other).at(-1)?.k || "")}`;
+  chart("wf-chart", { type: "bar", data: { labels: bars.map((b) => b.k), datasets: [{ data: bars.map((b) => b.y), backgroundColor: bars.map(col), borderRadius: 3, borderSkipped: false, barPercentage: 0.82, categoryPercentage: 1 }] },
+    options: barOpts({ plugins: { legend: { display: false }, tooltip: { callbacks: { title: (it) => bars[it[0].dataIndex].k, label: (it) => { const b = bars[it.dataIndex]; return b.start ? ` ${day ? "the value at the open" : "the money paid in"}` : b.end ? ` ${fmt(scale(total))} in all` : ` ${fmt(scale(b.v))}, running total ${fmt(b.y[1])}`; } } } },
+      onClick: (e, els) => { const b = els[0] && bars[els[0].index]; if (b?.tk) location.hash = stockHref(b.tk).slice(1); },
+      scales: { x: { grid: { display: false }, border: { display: false }, ticks: { autoSkip: false, maxRotation: 0, color: COL.fg, font: { family: "'JetBrains Mono', monospace", size: 10.5, weight: 700 } } },
+        y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => fmt(v), maxTicksLimit: 6 } } } }) });
+}
+$$("#wf-mode button").forEach((b) => b.addEventListener("click", () => { state.wf = b.dataset.wf; loadWaterfall(); }));
 
 /* ================= the weekly prediction game ================= */
 const LS = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -642,17 +813,24 @@ async function loadRecap() {
 
 /* ================= where it could go (Monte Carlo) ================= */
 state.mcH = 63;
+state.mcView = "now";
 async function loadMC() {
-  const m = await data.mc(), card = $("#mc-card");
-  card.hidden = !m?.fan?.length; if (card.hidden) return;
+  const m0 = await data.mc(), card = $("#mc-card");
+  card.hidden = !m0?.fan?.length; if (card.hidden) return;
+  $("#mc-view").hidden = !m0.anchor;
+  const fromStart = state.mcView === "start" && m0.anchor, m = fromStart ? m0.anchor : m0;
+  $$("#mc-view button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.mcv === (fromStart ? "start" : "now"))));
   const H = state.mcH, F = [[0, m.value, m.value, m.value, m.value, m.value], ...m.fan.slice(0, H)], v0 = m.value;
   const at = (k) => F.map((r) => ({ x: r[0], y: r[k] / v0 - 1 }));
-  $("#mc-sub").textContent = `${m.paths.toLocaleString("en-GB")} simulated paths built from how the ${m.holdings} stocks it holds now have moved day to day over the past year (${m.days_used} trading days), at today's weights, with the cash held flat. No trend up or down is assumed, so this shows how wide the range is, not a forecast.`;
+  // faint individual paths behind the range, and (from the start) the pie's real path over it
+  const paths = (m.samples || []).map((sp) => ({ type: "line", data: [{ x: 0, y: 0 }, ...sp.slice(0, H).map((y, i) => ({ x: i + 1, y }))], borderColor: "rgba(255,176,32,.13)", borderWidth: 0.8, pointRadius: 0, fill: false, order: 9, sample: true }));
+  const real = fromStart && m.real?.length ? [{ type: "line", label: "What really happened", data: m.real.map(([x, y]) => ({ x, y })), borderColor: COL.fg, borderWidth: 2.4, pointRadius: m.real.length < 4 ? 3 : 0, pointBackgroundColor: COL.fg, fill: false, order: 0, real: true }] : [];
+  $("#mc-sub").textContent = (fromStart ? `The range as first made on ${dShort(m.built)} at ${timeF.format(new Date(m.built))}, with the pie's real path since (white, by its unit price, so deposits don't count). ` : "") + `${m.paths.toLocaleString("en-GB")} simulated paths built from how the ${m.holdings} stocks it holds now have moved day to day over the past year (${m.days_used} trading days), at today's weights, with the cash held flat. No trend up or down is assumed, so this shows how wide the range is, not a forecast.`;
   const band = (lo, hi, a) => [{ data: at(lo), borderWidth: 0, pointRadius: 0, fill: false }, { data: at(hi), borderWidth: 0, pointRadius: 0, fill: "-1", backgroundColor: `rgba(255,176,32,${a})` }];
   chart("mc-chart", { type: "line", data: { datasets: [...band(1, 5, 0.12), ...band(2, 4, 0.22),
-      { label: "Middle", data: at(3), borderColor: COL.amber, borderWidth: 2, pointRadius: 0, fill: false }] },
+      { label: "Middle", data: at(3), borderColor: COL.amber, borderWidth: 2, pointRadius: 0, fill: false }, ...paths, ...real] },
     options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: "index", intersect: false },
-      plugins: { legend: { display: false }, tooltip: { filter: (it) => it.datasetIndex === 4, callbacks: { title: (it) => `${it[0].raw.x} trading days ahead`, label: (it) => { const r = F[it.dataIndex]; return [` Middle ${pct(r[3] / v0 - 1)}`, ` Half end between ${pct(r[2] / v0 - 1)} and ${pct(r[4] / v0 - 1)}`, ` 9 in 10 between ${pct(r[1] / v0 - 1)} and ${pct(r[5] / v0 - 1)}`]; } } } },
+      plugins: { legend: { display: false }, tooltip: { filter: (it) => it.datasetIndex === 4 || it.dataset.real, callbacks: { title: (it) => `${Math.round(it[0].raw.x * 10) / 10} trading days ${fromStart ? "from the start" : "ahead"}`, label: (it) => { if (it.dataset.real) return ` Really: ${pct2(it.raw.y)}`; const r = F[it.dataIndex]; if (!r) return ""; return [` Middle ${pct(r[3] / v0 - 1)}`, ` Half end between ${pct(r[2] / v0 - 1)} and ${pct(r[4] / v0 - 1)}`, ` 9 in 10 between ${pct(r[1] / v0 - 1)} and ${pct(r[5] / v0 - 1)}`]; } } } },
       scales: { x: { type: "linear", min: 0, max: H, grid: { display: false }, border: { display: false }, ticks: { stepSize: 21, callback: (d) => (d === 0 ? "now" : `${Math.round(d / 21)}M`) } },
         y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (x) => pct(x), maxTicksLimit: 6 } } } } });
   const end = F[F.length - 1], hz = m.horizons[String(H)] || {}, lab = { 21: "a month", 63: "three months", 252: "a year" }[H];
@@ -664,7 +842,101 @@ async function loadMC() {
     ["Chance of −10% or worse", p0(hz.down10), "down", `chance of +10% or better: ${p0(hz.up10)}`],
   ].map(([k, val, c, sub]) => `<div><dt>${k}</dt><dd class="${c}">${val}<small>${sub}</small></dd></div>`).join("");
 }
+$$("#mc-view button").forEach((b) => b.addEventListener("click", () => { state.mcView = b.dataset.mcv; loadMC(); }));
 $$("#mc-range button").forEach((b) => b.addEventListener("click", () => { state.mcH = +b.dataset.mc; $$("#mc-range button").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); loadMC(); }));
+
+/* ================= returns over any timeframe (squares + histogram) ================= */
+const TF_NAME = { 1: "minute", 5: "5 minutes", 15: "15 minutes", 60: "hour", D: "day" };
+const londonFmt = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+function londonParts(iso) {
+  const f = Object.fromEntries(londonFmt.formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+  return { day: `${f.year}-${f.month}-${f.day}`, mins: +f.hour * 60 + +f.minute };
+}
+// returns per bucket of tf minutes (London time) from the unit prices; "D": per day. Each
+// bucket runs from the end of the one before (its first: from its own first reading).
+function buckets(a, tf) {
+  if (tf === "D") {
+    const sd = a.series_day || [];
+    if (sd.length >= 3) return sd.slice(1).map((p, i) => ({ day: p[0], label: dShort(p[0]), r: p[1] / sd[i][1] - 1, first: false }));
+    tf = 1440;   // too few daily closes: each day from its readings
+  }
+  const out = []; let cur = null, prevEnd = null, prevDay = null;
+  for (const [t, u] of a.series_min || []) {
+    const { day, mins } = londonParts(t), slot = Math.floor(mins / tf) * tf, key = `${day} ${slot}`;
+    if (!cur || cur.key !== key) {
+      if (cur) { out.push(cur); prevEnd = cur.end; prevDay = cur.day; }
+      cur = { key, day, slot, start: prevEnd ?? u, end: u, first: prevDay !== null && prevDay !== day };
+    }
+    cur.end = u;
+  }
+  if (cur) out.push(cur);
+  const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  return out.map((b) => ({ day: b.day, label: tf >= 1440 ? dShort(b.day) : hm(b.slot), r: b.end / b.start - 1, first: b.first }));
+}
+function drawSquares() {
+  const { a, h, P } = state.quant || {}; if (!a) return;
+  const tf = state.calTf;
+  $$("#cal-tf button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.tf === tf)));
+  setTitle("#calendar", tf === "D" ? "Every trading day" : `Every ${TF_NAME[tf]}`);
+  const daily = tf === "D" && !h.early && P.length >= 2;
+  if (daily) {   // the classic calendar: one square per trading day
+    const days = P.slice(1).map((p, i) => ({ t: p.t, r: (1 + p.pie) / (1 + P[i].pie) - 1 }));
+    const start = parseDay(days[0].t); start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    const byDay = Object.fromEntries(days.map((d) => [d.t, d.r])), cells = [], months = [];
+    const end = parseDay(days.at(-1).t), span = Math.max(...days.map((d) => Math.abs(d.r)), 0.01) * 0.75;
+    for (let d = new Date(start), w = 0; d <= end; d.setDate(d.getDate() + 7), w++) {
+      months.push(d.getDate() <= 7 || w === 0 ? MON[d.getMonth()] : "");
+      for (let k = 0; k < 5; k++) { const x = new Date(d); x.setDate(d.getDate() + k); const key = `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`, r = byDay[key];
+        cells.push(r == null ? "<i></i>" : `<i data-r="${r}" data-d="${key}" style="background:${heat(r, span)}"></i>`); }
+    }
+    const ups = days.filter((d) => d.r > 0).length, base = `${ups} up days, ${days.length - ups} down`;
+    $("#cal-meta").textContent = base;
+    const g = $("#calendar");
+    g.innerHTML = `<div class="cal-months">${months.map((m) => `<span>${m}</span>`).join("")}</div><div class="cal-body"><div class="cal-days"><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span></div><div class="cal-grid">${cells.join("")}</div></div>`;
+    g.onmouseover = (e) => { const c = e.target.closest("[data-r]"); $("#cal-meta").innerHTML = c ? `${dLong(c.dataset.d)}  <b class="${cls(+c.dataset.r)}">${pct2(+c.dataset.r)}</b>` : base; };
+    g.onmouseleave = () => { $("#cal-meta").textContent = base; };
+    return;
+  }
+  const B = buckets(a, tf === "D" ? "D" : +tf);
+  if (!B.length) { $("#cal-meta").textContent = ""; $("#calendar").innerHTML = `<p class="empty">No readings to show yet.</p>`; return; }
+  const span = Math.max(...B.map((b) => Math.abs(b.r)), 0.0005) * 0.75, ups = B.filter((b) => b.r > 0).length;
+  const base = `${ups} up, ${B.length - ups} down`;
+  const rows = tf === "D" ? { "": B } : B.reduce((m, b) => ((m[b.day] ||= []).push(b), m), {});
+  $("#cal-meta").textContent = base;
+  const g = $("#calendar");
+  g.innerHTML = Object.entries(rows).map(([d, bs]) => `<div class="blk-row"><span>${d ? dShort(d) : ""}</span><div class="blk">${bs.map((b) => `<i data-r="${b.r}" data-l="${esc(`${dShort(b.day)}${tf === "D" ? "" : ` ${b.label}`}`)}" style="background:${heat(b.r, span)}"><small>${b.label}</small></i>`).join("")}</div></div>`).join("");
+  g.onmouseover = (e) => { const c = e.target.closest("[data-r]"); $("#cal-meta").innerHTML = c ? `${esc(c.dataset.l)}  <b class="${cls(+c.dataset.r)}">${pct2(+c.dataset.r)}</b>` : base; };
+  g.onmouseleave = () => { $("#cal-meta").textContent = base; };
+}
+function drawHist() {
+  const { a } = state.quant || {}; if (!a) return;
+  const tf = state.histTf;
+  $$("#hist-tf button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.tf === tf)));
+  setTitle("#hist-meta", tf === "D" ? "Daily returns" : tf === "1" ? "Minute returns" : tf === "60" ? "Hourly returns" : `${tf}-minute returns`);
+  // returns over the chosen period; the first of each day is left out (it spans the night)
+  const rs = buckets(a, tf === "D" ? "D" : +tf).filter((b) => tf === "D" || !b.first).map((b) => b.r);
+  if (rs.length < 3) { $("#hist-meta").textContent = ""; chartNote("hist-chart", "Not enough readings for this period yet."); return; }
+  chartNote("hist-chart", null);
+  const n = rs.length, mu = rs.reduce((x, y) => x + y, 0) / n, sd = Math.sqrt(rs.reduce((x, y) => x + (y - mu) ** 2, 0) / (n - 1)) || 1e-9;
+  const srt = [...rs].sort((x, y) => x - y), q = (p) => srt[Math.min(n - 1, Math.max(0, Math.round(p * (n - 1))))];
+  // bins centred on zero, a round width (the middle one, e.g. -0.01% to +0.01%, is grey)
+  const raw = Math.max(q(0.98) - q(0.02), 1e-6) / 14, p10 = 10 ** Math.floor(Math.log10(raw)), w = [1, 2, 2.5, 5, 10].map((m) => m * p10).find((x) => x >= raw);
+  const kLo = Math.round(q(0.02) / w) - 1, kHi = Math.round(q(0.98) / w) + 1, ks = [];
+  for (let k = Math.min(kLo, 0); k <= Math.max(kHi, 0); k++) ks.push(k);
+  const counts = ks.map(() => 0);
+  rs.forEach((r) => { const k = Math.min(Math.max(Math.round(r / w), ks[0]), ks.at(-1)); counts[k - ks[0]]++; });
+  const kurt = rs.reduce((x, y) => x + ((y - mu) / sd) ** 4, 0) / n - 3;
+  $("#hist-meta").innerHTML = `${n.toLocaleString("en-GB")} returns · fitted normal curve: average ${(mu * 100).toFixed(3)}%, spread ${(sd * 100).toFixed(3)}% · ${Math.abs(kurt) < 1 ? "close to normal" : kurt > 0 ? "fatter tails than normal" : "thinner tails than normal"}`;
+  const dec = Math.min(3, (String(+(w * 100).toPrecision(6)).split(".")[1] || "").length), grey = "rgba(237,235,230,.42)";
+  const fmt = (x) => (Math.abs(x) < 1e-12 ? "0%" : `${x > 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(dec)}%`);
+  chart("hist-chart", { data: { labels: ks.map((k) => fmt(k * w)), datasets: [
+    { type: "line", label: "Fitted normal curve", data: ks.map((k) => n * (Phi(((k + 0.5) * w - mu) / sd) - Phi(((k - 0.5) * w - mu) / sd))), borderColor: COL.fg, borderWidth: 1.5, borderDash: [4, 4], pointRadius: 0, tension: 0.4, order: 0 },
+    { type: "bar", label: "Returns", data: counts, backgroundColor: ks.map((k) => (k === 0 ? grey : k > 0 ? COL.up : COL.down)), borderRadius: 3, barPercentage: 0.94, categoryPercentage: 1, order: 1 }] },
+    options: barOpts({ plugins: { legend: { display: false }, tooltip: { mode: "index", intersect: false, callbacks: { title: (it) => `${fmt((ks[it[0].dataIndex] - 0.5) * w)} to ${fmt((ks[it[0].dataIndex] + 0.5) * w)}`, label: (it) => (it.dataset.type === "bar" ? ` ${it.raw} returns` : ` ${it.raw.toFixed(1)} on the fitted curve`) } } },
+      scales: { x: { grid: { display: false }, border: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { precision: 0 } } } }) });
+}
+$$("#cal-tf button").forEach((b) => b.addEventListener("click", () => { state.calTf = b.dataset.tf; drawSquares(); }));
+$$("#hist-tf button").forEach((b) => b.addEventListener("click", () => { state.histTf = b.dataset.tf; drawHist(); }));
 
 /* ================= warnings for estimates from too little data ================= */
 const RELIABLE_DAYS = 63;  // about three months of trading days
@@ -704,41 +976,13 @@ async function loadQuant() {
     [`Beta to the ${esc(bn)}${W_}`, n2(v.beta), "", `correlation ${n2(v.correlation)}`], ["Alpha" + W_, pct(v.alpha_annual), cls(v.alpha_annual), v.alpha_p < 0.05 ? "a year, statistically significant" : `a year, not yet significant (p ${n2(v.alpha_p)})`],
   ].map(([k, val, c, sub]) => `<div><dt>${k}</dt><dd class="${c}">${val}<small>${sub}</small></dd></div>`).join("");
 
-  // every trading day, as a calendar (early days: every 15 minutes)
-  setTitle("#calendar", rd ? "Every 15 minutes" : "Every trading day");
-  setTitle("#roll-meta", rd ? "Rolling 20-minute return" : "Rolling 20-day return");
-  setTitle("#hist-meta", rd ? "Minute returns" : "Daily returns");
-  if (rd && a.blocks?.length) {
-    const B = a.blocks, span = Math.max(...B.map((b) => Math.abs(b.r)), 0.0005) * 0.75, ups = B.filter((b) => b.r > 0).length;
-    const byDay = {}; B.forEach((b) => (byDay[b.t.slice(0, 10)] ||= []).push(b));
-    const base = `${ups} up, ${B.length - ups} down`;
-    $("#cal-meta").textContent = base;
-    $("#calendar").innerHTML = Object.entries(byDay).map(([d, bs]) => `<div class="blk-row"><span>${dShort(d)}</span><div class="blk">${bs.map((b) => `<i data-r="${b.r}" data-t="${esc(b.t)}" style="background:${heat(b.r, span)}"><small>${b.t.slice(11, 16)}</small></i>`).join("")}</div></div>`).join("");
-    const g = $("#calendar");
-    g.onmouseover = (e) => { const c = e.target.closest("[data-r]"); $("#cal-meta").innerHTML = c ? `${dShort(c.dataset.t)} ${c.dataset.t.slice(11, 16)}  <b class="${cls(+c.dataset.r)}">${pct2(+c.dataset.r)}</b>` : base; };
-    g.onmouseleave = () => { $("#cal-meta").textContent = base; };
-  }
-  const days = h.early ? [] : P.slice(1).map((p, i) => ({ t: p.t, r: (1 + p.pie) / (1 + P[i].pie) - 1 }));
-  const today = state.summary?.as_of ? new Date(state.summary.as_of).toLocaleDateString("en-CA", { timeZone: "Europe/London" }) : null;
-  if (!h.early && today && !days.some((d) => d.t === today) && !bad(state.summary?.day_change_pct) && new Date(today + "T12:00:00").getDay() % 6) days.push({ t: today, r: state.summary.day_change_pct });
-  if (!days.length && !(rd && a.blocks?.length)) { $("#cal-meta").textContent = ""; $("#calendar").innerHTML = `<p class="empty">Fills in once there's a day's change to show.</p>`; }
-  if (days.length) {
-    const start = parseDay(days[0].t); start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
-    const byDay = Object.fromEntries(days.map((d) => [d.t, d.r])), cells = [], months = [];
-    const end = parseDay(days.at(-1).t), span = Math.max(...days.map((d) => Math.abs(d.r)), 0.01) * 0.75;
-    for (let d = new Date(start), w = 0; d <= end; d.setDate(d.getDate() + 7), w++) {
-      months.push(d.getDate() <= 7 || w === 0 ? MON[d.getMonth()] : "");
-      for (let k = 0; k < 5; k++) { const x = new Date(d); x.setDate(d.getDate() + k); const key = `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`, r = byDay[key];
-        cells.push(r == null ? "<i></i>" : `<i data-r="${r}" data-d="${key}" style="background:${heat(r, span)}"></i>`); }
-    }
-    const upDays = days.filter((d) => d.r > 0).length, base = `${upDays} up days, ${days.length - upDays} down`;
-    $("#cal-meta").textContent = base;
-    $("#calendar").innerHTML = `<div class="cal-months">${months.map((m) => `<span>${m}</span>`).join("")}</div><div class="cal-body"><div class="cal-days"><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span></div><div class="cal-grid">${cells.join("")}</div></div>`;
-    const grid = $(".cal-grid");
-    grid.addEventListener("mouseover", (e) => { const c = e.target.closest("[data-r]"); $("#cal-meta").innerHTML = c ? `${dLong(c.dataset.d)}  <b class="${cls(+c.dataset.r)}">${pct2(+c.dataset.r)}</b>` : base; });
-    grid.addEventListener("mouseleave", () => { $("#cal-meta").textContent = base; });
-  }
+  // the squares and the returns histogram: any timeframe, from the raw readings
+  state.quant = { a, h, P };
+  if (state.calTf == null) state.calTf = rd ? "15" : "D";
+  if (state.histTf == null) state.histTf = rd ? "1" : "D";
+  drawSquares(); drawHist();
   chart("dd-chart", { type: "line", data: { datasets: [{ label: "Below the high", data: (st.drawdown || []).map((p) => ({ x: tms(p.t), y: p.dd })), borderColor: COL.down, backgroundColor: areaFill(COL.down, "55"), fill: "origin", borderWidth: 1.6, pointRadius: 0 }] }, options: timeOpts(pct) });
+  setTitle("#roll-meta", rd ? "Rolling 20-minute return" : "Rolling 20-day return");
   const roll = a.rolling20 || [];
   chartNote("roll-chart", roll.length ? null : rd ? "Needs 20 minutes of readings." : "Needs 20 trading days of daily closes.");
   $("#roll-meta").textContent = roll.length ? `ahead of the ${bn} ${p0(roll.filter((p) => p.bench != null && p.bot > p.bench).length / roll.length)} of the time` : "";
@@ -763,15 +1007,6 @@ async function loadQuant() {
     });
     g.addEventListener("mouseleave", () => { $$(".hot", g).forEach((x) => x.classList.remove("hot")); $("#corr-meta").textContent = base; });
   } else cg.innerHTML = `<p class="empty">Needs about three weeks of daily prices for each holding.</p>`;
-
-  // daily returns against a normal curve
-  const hist = a.histogram || [], mu = R.mean_daily, sd = K.volatility / Math.sqrt(252), nDays = hist.reduce((x, b) => x + b.n, 0);
-  $("#hist-meta").textContent = S.jarque_bera_p > 0.05 ? "close to a normal curve" : "fatter tails than a normal curve";
-  chart("hist-chart", { data: { labels: hist.map((b) => pct((b.lo + b.hi) / 2)), datasets: [
-    { type: "line", label: "Normal curve", data: hist.map((b) => nDays * (Phi((b.hi - mu) / sd) - Phi((b.lo - mu) / sd))), borderColor: COL.fg, borderWidth: 1.5, borderDash: [4, 4], pointRadius: 0, tension: 0.4, order: 0 },
-    { type: "bar", label: "Days", data: hist.map((b) => b.n), backgroundColor: hist.map((b) => ((b.lo + b.hi) / 2 >= 0 ? COL.up : COL.down)), borderRadius: 3, barPercentage: 0.94, categoryPercentage: 1, order: 1 }] },
-    options: barOpts({ plugins: { legend: { display: false }, tooltip: { mode: "index", intersect: false, callbacks: { title: (it) => `${pct2(hist[it[0].dataIndex].lo)} to ${pct2(hist[it[0].dataIndex].hi)}`, label: (it) => (it.dataset.type === "bar" ? ` ${it.raw} days` : ` ${it.raw.toFixed(1)} expected`) } } },
-      scales: { x: { grid: { display: false }, border: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { precision: 0 } } } }) });
 
   // month by month, bot against the benchmark
   const ends = {}; P.forEach((p) => { ends[p.t.slice(0, 7)] = p; });
@@ -829,8 +1064,9 @@ async function loadVol() {
   const hs = (state.empty ? state.holdingsData?.holdings || [] : held()).filter((h) => /_US_EQ$/.test(h.ticker)).sort((a, b) => (b.weight || 0) - (a.weight || 0));
   const pick = $("#vol-pick");
   if (!hs.length) { $("#vol-surface").innerHTML = `<p class="empty">No US-listed stocks to show.</p>`; return; }
-  if (!hs.some((h) => h.ticker === state.volTicker)) state.volTicker = hs[0].ticker;
-  if (pick.options.length !== hs.length) pick.innerHTML = hs.map((h) => `<option value="${esc(h.ticker)}"${h.ticker === state.volTicker ? " selected" : ""}>${esc(h.symbol)}  ${esc(h.name)}</option>`).join("");
+  // the whole pie first (its US holdings' surfaces combined), then each stock
+  if (state.volTicker !== "PIE" && !hs.some((h) => h.ticker === state.volTicker)) state.volTicker = "PIE";
+  if (pick.options.length !== hs.length + 1) pick.innerHTML = `<option value="PIE"${state.volTicker === "PIE" ? " selected" : ""}>The whole pie</option>` + hs.map((h) => `<option value="${esc(h.ticker)}"${h.ticker === state.volTicker ? " selected" : ""}>${esc(h.symbol)}  ${esc(h.name)}</option>`).join("");
   pick.onchange = () => { state.volTicker = pick.value; drawVol(); };
   if (state.volDrawn !== state.volTicker || !surfaces["vol-surface"]) await drawVol();
 }
@@ -843,7 +1079,7 @@ async function drawVol() {
   if (state.volTicker !== t) return;
   $("#view-quant").classList.toggle("no-vol", !d.available);
   if (!d.available || !window.VolSurface) {
-    host.innerHTML = `<p class="empty">No option prices available for ${esc(sym(t))} right now.</p>`; $("#vol-expiries").innerHTML = ""; $("#smile-meta").textContent = "";
+    host.innerHTML = `<p class="empty">No option prices available for ${t === "PIE" ? "the pie's stocks" : esc(sym(t))} right now.</p>`; $("#vol-expiries").innerHTML = ""; $("#smile-meta").textContent = "";
     ["smile-chart", "term-chart"].forEach((id) => { state.charts[id]?.destroy(); delete state.charts[id]; });
     return;
   }
@@ -939,8 +1175,33 @@ async function loadStock(ticker) {
   volCard.hidden = !ok; statsCard.className = `card ${ok ? "s4" : "s12"}`; $("#s-stats").classList.toggle("wide", !ok);
   if (ok) { surfaces["s-surface"] = VolSurface.render($("#s-surface"), vd); $("#s-vol-meta").textContent = `from option prices, share price ${money(vd.spot, "USD")}`; }
 }
+// 1D: minute prices for the latest New York session, from the open
+state.stockDay = {};
+async function drawStockDay(animate) {
+  const d = state.stockData, tk = d.ticker || state.stock;
+  let x = state.stockDay[tk];
+  if (!x || Date.now() - x.at > 120e3) {
+    try { x = state.stockDay[tk] = { at: Date.now(), ...(await get(`/api/stock/${encodeURIComponent(tk)}/intraday`)) }; }
+    catch { x = { points: [] }; }
+  }
+  if (state.srange !== 1 || state.stockData !== d) return;   // switched away while loading
+  const ccy = d.profile?.currency, P = (x.points || []).map((p) => ({ x: new Date(p.t).getTime(), y: p.price }));
+  if (P.length < 2) { $("#s-chart-meta").textContent = "No minute prices for today's session yet."; state.charts["s-chart"]?.destroy(); delete state.charts["s-chart"]; return; }
+  const o = x.open ?? P[0].y, ch = P.at(-1).y / o - 1, col = ch >= 0 ? COL.up : COL.down;
+  $("#s-chart-meta").innerHTML = `${dShort(x.session)} from the open: <b class="${cls(ch)}">${pct2(ch)}</b>${x.prev_close ? ` · ${pct2(P.at(-1).y / x.prev_close - 1)} on the close before` : ""}`;
+  const t0 = P[0].x, t1 = P.at(-1).x;
+  const marks = (side) => (d.trades || []).filter((t) => t.side === side).map((t) => new Date(t.t).getTime()).filter((v) => v >= t0 && v <= t1).map((v) => ({ x: v, y: P[nearest(P, v)].y }));
+  const c = chart("s-chart", { type: "line", data: { datasets: [
+    { label: "Price", data: P, borderColor: col, backgroundColor: areaFill(col, "30"), fill: "start", borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.12, order: 3, glow: true, tag: (v) => money(v, ccy) },
+    { label: "Today's open", data: [{ x: t0, y: o }, { x: t1, y: o }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, order: 4 },
+    { label: "Bot bought", data: marks("BUY"), type: "scatter", pointStyle: "triangle", pointRadius: 6, pointHoverRadius: 8, backgroundColor: COL.up, borderColor: COL.bg, borderWidth: 1.5, order: 1 },
+    { label: "Bot sold", data: marks("SELL"), type: "scatter", pointStyle: "triangle", rotation: 180, pointRadius: 6, pointHoverRadius: 8, backgroundColor: COL.down, borderColor: COL.bg, borderWidth: 1.5, order: 2 },
+  ] }, options: { ...timeOpts((v) => money(v, ccy), { tags: true, tagPad: 86, intraday: true }), interaction: { mode: "nearest", axis: "x", intersect: false } } });
+  if (animate && P.length > 2) reveal(c);
+}
 function drawStockChart(animate = false) {
   const d = state.stockData; if (!d) return;
+  if (state.srange === 1) return drawStockDay(animate);
   const cutoff = Date.now() - state.srange * 864e5, fromPie = !d.prices?.length, prices = fromPie ? d.pie_prices || [] : d.prices;
   const all = prices.map((p) => ({ x: tms(p.t), y: p.close })), P = all.filter((p) => p.x >= cutoff), ccy = fromPie ? "GBP" : d.profile?.currency;
   const marks = (side) => (d.trades || []).filter((t) => t.side === side).map((t) => new Date(t.t).getTime()).filter((x) => P.length && x >= P[0].x - 864e5 && x <= P.at(-1).x + 864e5).map((x) => ({ x, y: all[nearest(all, x)].y }));

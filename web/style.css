@@ -393,3 +393,12 @@ footer { margin-top: 22px; display: flex; flex-wrap: wrap; justify-content: spac
 .mc-canvas { min-height: 260px; }
 .recap td { text-align: left; }
 .recap td:first-child { white-space: nowrap; width: 1%; padding-right: 14px; }
+.cal-meta { margin: -6px 0 10px; }
+.wf-canvas { min-height: 300px; }
+.rr-canvas { min-height: 380px; }
+.mc-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+/* deeper analysis */
+.rb-canvas { min-height: 300px; }
+.fx-canvas { min-height: 320px; }
+/* explanations under a chart's title read left to right */
+#rb-meta, #fx-sub, #opt-sub, #acf-meta, #rr-meta, #wf-meta, #hist-meta, #cal-meta { text-align: left; }

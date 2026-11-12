@@ -90,6 +90,14 @@ def create_app(cfg: Settings | None = None, Session_: sessionmaker[Session] | No
             raise HTTPException(404, "not a stock the bot has held")
         return data
 
+    @app.get("/api/stock/{ticker}/intraday")
+    def stock_intraday(ticker: str = PathParam(..., pattern=r"^[A-Za-z0-9_.\-]{1,32}$")):
+        with SessionF() as s:
+            data = service.stock_intraday(s, cfg, ticker)
+        if data is None:
+            raise HTTPException(404, "not a stock the bot has held")
+        return data
+
     @app.get("/api/rebalances")
     def rebalances():
         return cached("rebalances", lambda s: service.rebalances(s, cfg))
@@ -114,9 +122,17 @@ def create_app(cfg: Settings | None = None, Session_: sessionmaker[Session] | No
     def correlations():
         return cached("correlations", lambda s: service.correlations(s, cfg))
 
+    @app.get("/api/quant")
+    def quant_pack():
+        return cached("quant", lambda s: service.quant_pack(s, cfg))
+
+    @app.get("/api/riskreturn")
+    def risk_return():
+        return cached("riskreturn", lambda s: service.risk_return(s, cfg))
+
     @app.get("/api/montecarlo")
     def monte_carlo():
-        return cached("montecarlo", lambda s: get_meta(s, "monte_carlo") or {"ready": False})
+        return cached("montecarlo", lambda s: service.monte_carlo(s, cfg))
 
     @app.get("/api/recap")
     def recap():

@@ -15,9 +15,11 @@ from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from . import yahoo_closes
-from .db import set_meta
+from .db import get_meta, set_meta
 
 META_KEY = "monte_carlo"
+ANCHOR_KEY = "monte_carlo_anchor"   # the first range ever made, kept so reality can be laid over it
+SAMPLE_PATHS = 60                   # individual paths sent to the page, drawn faintly
 PATHS = 2000
 HORIZON = 252          # trading days: a year
 BLOCK = 5              # days drawn together
@@ -65,6 +67,8 @@ def simulate(daily: list[float], start_value: float, cash: float, horizon: int =
                 g *= 1 + r[(i + k) % n]
                 by_day[day][p] = cash + invested0 * g
                 day += 1
+    # a few whole paths, as % from the start, for drawing
+    samples = [[round(by_day[d][p] / start_value - 1, 4) for d in range(horizon)] for p in range(min(SAMPLE_PATHS, paths))]
     fan = []
     for d in range(horizon):
         v = sorted(by_day[d])
@@ -77,10 +81,11 @@ def simulate(daily: list[float], start_value: float, cash: float, horizon: int =
             horizons[str(h)] = {"loss": sum(x < start_value for x in v) / paths,
                                 "down10": sum(x < start_value * 0.9 for x in v) / paths,
                                 "up10": sum(x > start_value * 1.1 for x in v) / paths}
-    return {"fan": fan, "horizons": horizons, "vol_annual": sd * math.sqrt(252) * invested0 / start_value}
+    return {"fan": fan, "samples": samples, "horizons": horizons, "vol_annual": sd * math.sqrt(252) * invested0 / start_value}
 
 
-def build(s: Session, holdings: list[tuple[str, float]], cash: float, today: date | None = None) -> dict | None:
+def build(s: Session, holdings: list[tuple[str, float]], cash: float, today: date | None = None,
+          unit_price: float | None = None) -> dict | None:
     """holdings: (ticker, value in GBP). Stores and returns the simulation, or None."""
     today = today or datetime.now(timezone.utc).date()
     value = sum(v for _, v in holdings) + cash
@@ -97,4 +102,7 @@ def build(s: Session, holdings: list[tuple[str, float]], cash: float, today: dat
             "days_used": len(daily), "paths": PATHS, "holdings": len(covered),
             "left_out": sorted(set(weights) - set(covered)), **sim}
     set_meta(s, META_KEY, data)
+    if unit_price and not get_meta(s, ANCHOR_KEY):
+        # the first range ever made stays put: the page lays the pie's real path over it
+        set_meta(s, ANCHOR_KEY, {**data, "unit_price": unit_price})
     return data

@@ -30,6 +30,10 @@ def _local_date(ts: datetime, tz: ZoneInfo) -> date:
     return ts.replace(tzinfo=timezone.utc).astimezone(tz).date()
 
 
+def gbp_text(x: float) -> str:
+    return f"£{x:,.0f}"
+
+
 def _iso(ts: datetime | None) -> str | None:
     return ts.replace(tzinfo=timezone.utc).isoformat() if ts else None
 
@@ -253,13 +257,28 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
         return {"range": rng, "intraday": True, "baseline": rows[0].value,
                 "baseline_label": "Today's open" if at_open else "First reading today",
                 "benchmarks": _bench_since(s, cfg, rows[0].date),
+                # the whole New York session, so the chart fills in across the day like it did live
+                "session": _session_bounds(rows[0].date.astimezone(tz).date()),
                 "points": [{"t": r.date.isoformat(), "value": r.value, "u": r.unit_price} for r in rows]}
     if len(_daily(s)) < DAILY_STATS_FROM:
         # early days: every reading since the pie first held stocks, against the market over
         # the same minutes, for every range (they all cover the whole record so far)
         readings = reading_series(s, with_value=True, cfg=cfg)
         if len(readings) >= 2:
-            t0 = readings[0][0]
+            t0, dep = readings[0][0], deposits(s)
+            if dep:
+                # 0% = break-even: worth what's been paid in; the market on the same money
+                at = lambda t: deposits_at(dep, t.astimezone(tz).date())
+                bench = [{"key": tk, "name": dict(cfg.benchmarks)[tk],
+                          "points": [{"t": t.isoformat(), "pct": v / at(t) - 1} for t, v in path if at(t)]}
+                         for tk, path in _bench_paths(s, cfg, dep, t0, tz).items()]
+                # where the money started: break-even at New York's open on the first day
+                op = _session_bounds(t0.astimezone(NY).date())["open"]
+                return {"range": rng, "intraday": True, "early": True, "even": True,
+                        "origin": op if datetime.fromisoformat(op) < t0 else None,
+                        "baseline_label": f"Break-even ({gbp_text(deposits_at(dep, readings[-1][0].astimezone(tz).date()))} paid in)",
+                        "benchmarks": bench,
+                        "points": [{"t": t.isoformat(), "value": v, "u": u, "dep": at(t)} for t, u, v in readings]}
             return {"range": rng, "intraday": True, "early": True, "baseline_label": "Start",
                     "benchmarks": _bench_since(s, cfg, t0),
                     # u: unit price, so money moving in or out doesn't show as a gain
@@ -277,6 +296,8 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
     else:
         start = rows[0].date
     keep = [i for i, r in enumerate(rows) if r.date >= start] or [len(rows) - 1]
+    dep_all = deposits(s)
+    cum_dep_all = [deposits_at(dep_all, r.date) for r in rows] if dep_all else None
     rows = [rows[i] for i in keep]
     total_value = [total_value[i] for i in keep]
     new_money = [new_money[i] for i in keep]
@@ -293,10 +314,12 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
             continue
         bench_meta.append({"key": ticker, "name": name})
         bench_pct[ticker] = [(x / al[0] - 1) if x else None for x in al]
-        units, vals = base_value / al[0], []
+        whole = keep[0] == 0 and cum_dep_all is not None
+        units, vals = (cum_dep_all[0] if whole else base_value) / al[0], []
         for i, px in enumerate(al):
             if i > 0 and px:
-                units += new_money[i] / px
+                # over the whole record, money goes in as it was deposited; else as it reached the pie
+                units += ((cum_dep_all[keep[i]] - cum_dep_all[keep[i] - 1]) if whole else new_money[i]) / px
             vals.append(units * px if px else None)
         bench_val[ticker] = vals
 
@@ -311,9 +334,11 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
                 j += 1
             cum_dep.append(total)
 
+    first_open = _session_bounds(rows[0].date)["open"] if keep[0] == 0 and cum_dep_all else None
     return {
         "range": rng,
         "intraday": False,
+        "origin": first_open,   # the whole record: break-even at the first day's open
         "benchmarks": bench_meta,
         "benchmark_name": cfg.benchmark_name,
         "has_deposits": cum_dep is not None,
@@ -367,7 +392,6 @@ def _open_prices(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | No
     day = _local_date(snap.ts, tz)
     ny_open = datetime.combine(day, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY) \
         .astimezone(timezone.utc).replace(tzinfo=None)
-    ny_open = max(ny_open, record_start(cfg) or ny_open)   # the record's first day may start later
     if snap.ts < ny_open:
         return None
     ids = list(s.scalars(select(PieSnapshot.id).where(PieSnapshot.ts >= ny_open).order_by(PieSnapshot.ts)))
@@ -673,33 +697,22 @@ def _per_year(series: list) -> float | None:
     return 252 * SESSION_S / gaps[len(gaps) // 2]
 
 
-def _blocks(series: list, tz: ZoneInfo, minutes: int = 15) -> list[dict]:
-    """The pie's return in each 15-minute block (London time) that has readings."""
-    out, prev_end, cur = [], None, None
-    for ts, p in series:
-        local = ts.astimezone(tz)
-        slot = local.replace(minute=local.minute - local.minute % minutes, second=0, microsecond=0)
-        if cur is None or slot != cur["slot"]:
-            if cur:
-                out.append(cur)
-                prev_end = cur["end"]
-            cur = {"slot": slot, "start": prev_end if prev_end is not None else p, "end": p}
-        cur["end"] = p
-    if cur:
-        out.append(cur)
-    return [{"t": b["slot"].isoformat(), "r": b["end"] / b["start"] - 1} for b in out if b["start"]]
-
-
 def _today_rows(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | None = None) -> tuple[list[DailyRow], bool]:
     """Today's readings as unit-price rows, from today's open (09:30 in New York, where most of
-    the pie trades). Before the open: from the first reading today. Second value: whether
-    they start at the open."""
+    the pie trades). Before the open: from the first reading today. Second value: whether they
+    start at the open."""
     day = _local_date(snap.ts, tz)
-    rows = [r for r in _all_readings(s, cfg)[0] if r.date.astimezone(tz).date() == day]
+    # "today" always runs from the market open, even on a day the record itself starts later
+    rows = [r for r in _all_readings(s)[0] if r.date.astimezone(tz).date() == day]
     ny_open = datetime.combine(day, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY).astimezone(timezone.utc)
     if any(r.date >= ny_open for r in rows):
         return [r for r in rows if r.date >= ny_open], True
     return rows, False
+
+
+def _session_bounds(day: date) -> dict:
+    at = lambda h, m: datetime.combine(day, datetime.min.time().replace(hour=h, minute=m), tzinfo=NY).astimezone(timezone.utc).isoformat()
+    return {"open": at(9, 30), "close": at(16, 0)}
 
 
 def _since_open(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | None = None) -> dict | None:
@@ -713,6 +726,40 @@ def _since_open(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | Non
     return {"pct": pct, "gbp": gbp, "at_open": at_open, "from": rows[0].date.isoformat()}
 
 
+def _bench_paths(s: Session, cfg: Settings, dep: list, started: datetime | None,
+                 tz: ZoneInfo) -> dict[str, list[tuple[datetime, float]]]:
+    """Early days: what the same money would be worth in each benchmark, minute by minute.
+    The first day's deposits go in at the start, less what reached the pie later; every later
+    amount goes in at the minute it reached the pie (from the readings: buys - sells + the
+    change in cash). {ticker: [(time, value in GBP)]}."""
+    if not started or not dep:
+        return {}
+    start_day = started.astimezone(tz).date()
+    first = sum(a for d, a in dep if d <= start_day)
+    later = [(t, f) for t, f in _all_readings(s, cfg)[1] if t > started]
+    first_day_later = sum(f for t, f in later if t.astimezone(tz).date() == start_day)
+    out = {}
+    for ticker, _name in cfg.benchmarks:
+        minute = intraday.gbp_series(s, ticker)
+        p0 = intraday.at(minute, started) if minute else None
+        if not p0 or not all(intraday.at(minute, t) for t, _ in later):
+            continue
+        units, j, path = max(0.0, first - first_day_later) / p0, 0, [(started, max(0.0, first - first_day_later))]
+        for t, price in minute:
+            if t <= started:
+                continue
+            while j < len(later) and later[j][0] <= t:
+                units += later[j][1] / intraday.at(minute, later[j][0])
+                j += 1
+            path.append((t, units * price))
+        out[ticker] = path
+    return out
+
+
+def deposits_at(dep: list, when: date) -> float:
+    return sum(a for d, a in dep if d <= when)
+
+
 def _bench_on_deposits(s: Session, cfg: Settings, dep: list, started: datetime | None, first_day: date,
                        tz: ZoneInfo) -> dict:
     """What each benchmark would have made on the same deposits, as a return on them: money paid
@@ -724,22 +771,15 @@ def _bench_on_deposits(s: Session, cfg: Settings, dep: list, started: datetime |
     out = {}
     daily = benchmark_series(s, cfg)
     start_day = started.astimezone(tz).date() if started else None
-    later = [(t, f) for t, f in _all_readings(s, cfg)[1] if started and t > started]
+    paths = _bench_paths(s, cfg, dep, started, tz)
     for ticker, name in cfg.benchmarks:
         minute = intraday.gbp_series(s, ticker)
         ser = daily.get(ticker, (name, []))[1]
+        if paths.get(ticker):   # early days: the money as it really went in
+            out[ticker] = {"name": name, "return": paths[ticker][-1][1] / net - 1}
+            continue
         value = 0.0
-        first = [(d, amt) for d, amt in dep if start_day and d <= start_day]
-        if first and minute and intraday.at(minute, started) and all(intraday.at(minute, t) for t, _ in later):
-            # money from the first day: what wasn't added later went in at the start; each later
-            # amount went in at the minute it reached the pie (a deposit invested mid-session)
-            units = max(0.0, sum(a for _, a in first) - sum(f for _, f in later)) / intraday.at(minute, started)
-            units += sum(f / intraday.at(minute, t) for t, f in later)
-            value += units * minute[-1][1]
-            dep_rest = [x for x in dep if x not in first]
-        else:
-            dep_rest = dep
-        for d, amt in dep_rest:
+        for d, amt in dep:
             g = None
             if started and d <= start_day:
                 g = intraday.change_since(minute, started)
@@ -755,14 +795,14 @@ def _bench_on_deposits(s: Session, cfg: Settings, dep: list, started: datetime |
     return out
 
 
-def _bench_since(s: Session, cfg: Settings, t0: datetime) -> list[dict]:
+def _bench_since(s: Session, cfg: Settings, t0: datetime, t1: datetime | None = None) -> list[dict]:
     """Each benchmark's minute prices from t0 on, as % change since t0."""
     out = []
     for ticker, name in cfg.benchmarks:
         ser = intraday.gbp_series(s, ticker)
         p0 = intraday.at(ser, t0)
         if p0:
-            later = [(t, p) for t, p in ser if t > t0]
+            later = [(t, p) for t, p in ser if t > t0 and (t1 is None or t <= t1)]
             pts = [{"t": t0.isoformat(), "pct": 0.0}]
             if later and (later[0][0] - t0) > timedelta(minutes=5):
                 # the market was shut (e.g. before New York opens): flat until its first price
@@ -822,10 +862,14 @@ def analysis_payload(s: Session, cfg: Settings) -> dict:
         a = analysis.analyse(readings, benches_min, move_times, cfg.risk_free_rate, periods_per_year=ppy)
         if a.get("ready"):
             a["readings"] = _reading_info(readings)
-            a["blocks"] = _blocks(readings, tz)
             a["verdict"] = []
     else:
         a = analysis.analyse(series, benches, move_days, cfg.risk_free_rate)
+    # the raw unit prices, so the page can show returns over any timeframe: every reading while
+    # New York was open over the last week, and every daily close
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    a["series_min"] = [[t.isoformat(), round(u, 7)] for t, u in (readings or reading_series(s, cfg=cfg)) if t >= week_ago]
+    a["series_day"] = [[r.date.isoformat(), round(r.unit_price, 7)] for r in rows]
     # turnover per move: half the sum of absolute weight changes
     turns = []
     for (ch,) in s.execute(select(Rebalance.changes)):
@@ -927,6 +971,128 @@ def recap(s: Session, cfg: Settings) -> dict:
     if snap and saved and saved[-1]["date"] == _local_date(snap.ts, tz).isoformat():
         return saved[-1]
     return build_recap(s, cfg) or {"ready": False}
+
+
+RR_WINDOWS = (21, 63, 252)   # trading days: about a month, three months, a year
+
+
+def _rr_point(prices: list[float], n: int) -> dict | None:
+    """Return over the last n daily closes and the swing over the same stretch: the spread of
+    daily returns scaled to n days (sd x sqrt(n)), so the two are directly comparable."""
+    if len(prices) < n + 1:
+        return None
+    w = prices[-(n + 1):]
+    r = [b / a - 1 for a, b in zip(w, w[1:]) if a]
+    if len(r) < 5:
+        return None
+    m = sum(r) / len(r)
+    sd = (sum((x - m) ** 2 for x in r) / (len(r) - 1)) ** 0.5
+    return {"ret": w[-1] / w[0] - 1, "swing": sd * n ** 0.5, "vol": sd * 252 ** 0.5}
+
+
+def risk_return(s: Session, cfg: Settings) -> dict:
+    """Each holding, the pie's current mix and the benchmarks: return against swing over about
+    a month, three months and a year, from Yahoo daily closes in GBP."""
+    from . import montecarlo
+    hs = [h for h in holdings(s, cfg).get("holdings", []) if (h.get("value") or 0) > 0]
+    per = yahoo_closes.per_share(s)
+    out = {"windows": list(RR_WINDOWS), "stocks": [], "pie": {}, "benchmarks": []}
+    for h in hs:
+        prices = [p for _, p in per.get(h["ticker"], [])]
+        pts = {str(n): _rr_point(prices, n) for n in RR_WINDOWS}
+        if any(pts.values()):
+            out["stocks"].append({"ticker": h["ticker"], "symbol": h["symbol"], "name": h["name"],
+                                  "sector": h.get("sector") or "Other", "weight": h["weight"], **pts})
+    weights = {h["ticker"]: h["weight"] for h in hs}
+    daily = montecarlo.portfolio_returns(per, weights)
+    if daily:
+        growth = [1.0]
+        for r in daily:
+            growth.append(growth[-1] * (1 + r))
+        out["pie"] = {str(n): _rr_point(growth, n) for n in RR_WINDOWS}
+    for ticker, name in cfg.benchmarks:
+        h = market.get(s, "history", ticker, allow_fetch=False) or {}
+        prices = [p["close"] for p in h.get("points", []) if p.get("close")]
+        if prices:
+            out["benchmarks"].append({"ticker": ticker, "name": name, **{str(n): _rr_point(prices, n) for n in RR_WINDOWS}})
+    return out
+
+
+def quant_pack(s: Session, cfg: Settings) -> dict:
+    """The deeper analysis of today's mix (built by the poller), plus this pie's own rolling beta
+    against the S&P from its minute readings."""
+    from . import quant
+    import numpy as np
+    pack = dict(get_meta(s, quant.META_KEY) or {"ready": False})
+    readings = reading_series(s, cfg=cfg)
+    ser = intraday.gbp_series(s, cfg.benchmark_ticker)
+    pts = [(t, u, intraday.at(ser, t)) for t, u in readings] if ser else []
+    pts = [x for x in pts if x[2]]
+    pairs = [((u1 / u0 - 1), (b1 / b0 - 1), t1) for (t0, u0, b0), (t1, u1, b1) in zip(pts, pts[1:])
+             if (t1 - t0).total_seconds() < 600]     # within a session, not across the night
+    W = 30
+    roll = []
+    if len(pairs) > W + 5:
+        y = np.array([p[0] for p in pairs]); x = np.array([p[1] for p in pairs])
+        per_year = _per_year(readings) or 252 * 390
+        for i in range(W, len(pairs) + 1):
+            f = quant.ols(y[i - W:i], x[i - W:i, None])
+            b, se = float(f["coef"][1]), float(f["se"][1])
+            roll.append({"t": pairs[i - 1][2].isoformat(), "beta": b, "lo": b - 1.96 * se, "hi": b + 1.96 * se,
+                         "alpha": float(f["coef"][0]) * per_year, "r2": f["r2"]})
+    pack["pie_rolling"] = roll
+    pack["pie_window"] = W
+    return pack
+
+
+def monte_carlo(s: Session, cfg: Settings) -> dict:
+    """The latest range of outcomes, and the first one ever made with the pie's real path since
+    (unit price, so deposits don't count), in trading days from when it was made."""
+    from . import montecarlo
+    data = get_meta(s, montecarlo.META_KEY)
+    if not data:
+        return {"ready": False}
+    anchor = get_meta(s, montecarlo.ANCHOR_KEY)
+    if anchor and anchor.get("unit_price"):
+        tz = ZoneInfo(cfg.timezone)
+        t0 = datetime.fromisoformat(anchor["built"])
+        d0 = t0.astimezone(tz).date()
+        weekdays = lambda d: sum(1 for i in range(1, (d - d0).days + 1) if (d0 + timedelta(days=i)).weekday() < 5)
+        real = [[0, 0.0]]
+        for r in _daily(s):
+            if r.date > d0:
+                real.append([weekdays(r.date), r.unit_price / anchor["unit_price"] - 1])
+        sm = summary(s, cfg)
+        if sm.get("ready") and sm.get("unit_price"):
+            now = datetime.now(timezone.utc)
+            today = now.astimezone(tz).date()
+            # part of today's session gone (09:30-16:00 New York)
+            et = now.astimezone(NY)
+            frac = min(1.0, max(0.0, ((et.hour - 9.5) * 60 + et.minute) / 390)) if today.weekday() < 5 else 0.0
+            since = (now - t0).total_seconds() / (6.5 * 3600) if today == d0 else None
+            x = min(since, 1.0) if since is not None else max(0, weekdays(today) - 1) + frac
+            real.append([round(x, 3), sm["unit_price"] / anchor["unit_price"] - 1])
+        anchor = {k: v for k, v in anchor.items() if k != "unit_price"} | {"real": sorted(real)}
+    return {**data, "anchor": anchor}
+
+
+def stock_intraday(s: Session, cfg: Settings, ticker: str) -> dict | None:
+    """Minute prices (the stock's own currency) for its latest New York session, from the open,
+    with the open and the close before it. None if it was never in the pie."""
+    if ticker not in pie_tickers(s):
+        return None
+    sym = market.yahoo_symbol(s, ticker)
+    data = market.get(s, "intraday", sym) if sym else None
+    pts = [(datetime.fromisoformat(t), c) for t, c in (data or {}).get("points", [])]
+    if not pts:
+        return {"ticker": ticker, "points": []}
+    day = pts[-1][0].astimezone(NY).date()
+    ny_open = datetime.combine(day, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY)
+    today = [(t, c) for t, c in pts if t >= ny_open]
+    before = [c for t, c in pts if t < ny_open]
+    return {"ticker": ticker, "symbol": sym, "session": day.isoformat(),
+            "open": today[0][1] if today else None, "prev_close": before[-1] if before else None,
+            "points": [{"t": t.isoformat(), "price": c} for t, c in today]}
 
 
 def stock_detail(s: Session, cfg: Settings, ticker: str) -> dict | None:
@@ -1032,7 +1198,10 @@ def news(s: Session, cfg: Settings, limit: int = 30) -> dict:
 
 def vol_surface(s: Session, ticker: str) -> dict | None:
     """Implied volatility surface for a stock the pie holds (None if it never has)."""
-    from . import market
+    from . import market, quant
+    if ticker == "PIE":   # the whole pie, from its US holdings' surfaces
+        hs = [h for h in holdings(s).get("holdings", []) if (h.get("value") or 0) > 0]
+        return {"ticker": "PIE", "symbol": "The whole pie", **quant.pie_vol_surface(s, hs)}
     if ticker not in pie_tickers(s):
         return None
     sym = market.yahoo_symbol(s, ticker)

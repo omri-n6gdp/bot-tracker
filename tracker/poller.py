@@ -346,11 +346,30 @@ class Poller:
                 if same and age < timedelta(hours=6):
                     return False
             built = yahoo_closes.build(s, held)
+            from . import market, quant
+            # a year of the benchmarks and the style funds, for "risk against reward" and the
+            # factor exposures; option prices for each US holding (implied volatility)
+            for sym in [bt for bt, _ in self.cfg.benchmarks] + quant.FACTOR_FUNDS + ["GBPUSD=X"]:
+                market.get(s, "history", sym)
+            for tk, _, _ in held:
+                if tk.endswith("_US_EQ") and (ysym := market.yahoo_symbol(s, tk)):
+                    market.get(s, "vol", ysym)
+            s.commit()
             self._ok(s, "yahoo_closes")
             s.commit()
+            if built:  # the deeper analysis of today's mix (rolling beta, factors, options)
+                try:
+                    quant.build(s, [{"ticker": h["ticker"], "symbol": h["symbol"], "weight": h["weight"]}
+                                    for h in service.holdings(s, self.cfg).get("holdings", []) if (h.get("value") or 0) > 0],
+                                self.cfg.benchmark_ticker)
+                    s.commit()
+                except Exception as exc:
+                    log.warning("quant pack failed: %s", exc)
             if built:  # the range of outcomes uses these closes and today's weights
                 from . import montecarlo
-                montecarlo.build(s, [(tk, v) for tk, _, v in held], snap.cash or 0.0)
+                sm = service.summary(s, self.cfg)
+                montecarlo.build(s, [(tk, v) for tk, _, v in held], snap.cash or 0.0,
+                                 unit_price=sm.get("unit_price") if sm.get("ready") else None)
                 s.commit()
         log.info("yahoo closes %s", f"for {len(built['tickers'])} holdings" if built else "not available")
         return bool(built)

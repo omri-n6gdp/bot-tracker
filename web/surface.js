@@ -20,10 +20,32 @@
     let E = data.expiries, Z = data.iv;
     const keep = E.map((e, i) => i).filter((i) => E[i].days >= 10);
     if (keep.length >= 4) { E = keep.map((i) => E[i]); Z = keep.map((i) => Z[i]); }
+    // two passes of a 1-2-1 smoother across strikes and across expiries (edges kept)
     const sm = (row) => row.map((v, j) => (j === 0 || j === row.length - 1 ? v : (row[j - 1] + 2 * v + row[j + 1]) / 4));
-    let S = Z.map(sm);
-    S = S.map((row, i) => row.map((v, j) => (i === 0 || i === S.length - 1 ? v : (S[i - 1][j] + 2 * v + S[i + 1][j]) / 4)));
+    let S = Z;
+    for (let pass = 0; pass < 2; pass++) {
+      S = S.map(sm);
+      S = S.map((row, i) => row.map((v, j) => (i === 0 || i === S.length - 1 ? v : (S[i - 1][j] + 2 * v + S[i + 1][j]) / 4)));
+    }
     return { M: data.moneyness, E, Z: S, spot: data.spot };
+  }
+
+  /* a finer mesh for drawing: Catmull-Rom curves through the grid, k steps between points,
+     across strikes and across (square-root) time; the original expiries are kept and marked */
+  const cr = (a, b, c, d, t) => 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (-a + 3 * b - 3 * c + d) * t * t * t);
+  const up = (arr, k) => {
+    const out = [];
+    for (let i = 0; i < arr.length - 1; i++) for (let s = 0; s < k; s++) out.push(cr(arr[Math.max(0, i - 1)], arr[i], arr[i + 1], arr[Math.min(arr.length - 1, i + 2)], s / k));
+    out.push(arr.at(-1));
+    return out;
+  };
+  function refine(M, E, Z, k = 3) {
+    const M2 = up(M, k), rows = Z.map((r) => up(r, k));
+    const cols = M2.map((_, j) => up(rows.map((r) => r[j]), k));
+    const sq = up(E.map((e) => Math.sqrt(e.days)), k);
+    const E2 = sq.map((v, i) => (i % k === 0 ? { ...E[i / k], orig: true } : { days: Math.round(v * v), orig: false }));
+    const Z2 = sq.map((_, i) => cols.map((c) => Math.max(0.01, c[i])));
+    return { M: M2, E: E2, Z: Z2, k };
   }
 
   function render(host, data, opts = {}) {
@@ -36,10 +58,13 @@
     canvas.setAttribute("role", "img");
     canvas.setAttribute("aria-label", "Implied volatility by strike and expiry. Drag to rotate.");
 
-    const { M, E, Z } = prep(data);
+    const coarse = prep(data);
+    const { M, E, Z, k: K } = refine(coarse.M, coarse.E, coarse.Z);
     const sorted = Z.flat().sort((a, b) => a - b), q = (f) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(f * (sorted.length - 1))))];
     const zmin = q(0.03), zmax = Math.max(q(0.97), zmin + 0.02), zr = zmax - zmin;        // colour range
-    const hspan = Math.max(zr, 0.6 * q(0.5)), hlo = Math.max(0, (zmin + zmax) / 2 - hspan / 2); // height range (wider, so noise isn't magnified)
+    // height range: the whole surface, so nothing is clipped flat (at least 60% of the typical
+    // vol tall, so a nearly flat surface isn't magnified into noise)
+    const zlo = sorted[0], zhi = sorted.at(-1), hspan = Math.max(zhi - zlo, 0.6 * q(0.5)), hlo = Math.max(0, (zlo + zhi) / 2 - hspan / 2);
     const sq = E.map((e) => Math.sqrt(e.days)), sqMin = Math.min(...sq), sqMax = Math.max(...sq);
     const XW = 1.35, ZH = 1.05;
     const P = Z.map((row, i) => row.map((v, j) => ({
@@ -51,7 +76,7 @@
     bar.querySelector("i").style.background = `linear-gradient(90deg, ${[0, .25, .5, .75, 1].map((t) => colour(t)).join(",")})`;
 
     const HOME = { yaw: 0.62, pitch: 0.55 };
-    let yaw = HOME.yaw, pitch = HOME.pitch, W = 0, H = 0, proj = [], picked = opts.highlight ?? null, touched = false, raf = 0, t0 = performance.now();
+    let yaw = HOME.yaw, pitch = HOME.pitch, W = 0, H = 0, proj = [], picked = opts.highlight != null ? opts.highlight * K : null, touched = false, raf = 0, t0 = performance.now();
     const view = (p) => {
       const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
       const x1 = p.x * cy - p.y * sy, y1 = p.x * sy + p.y * cy;
@@ -97,7 +122,11 @@
         quads.push({ pts: pts2, d: pts2.reduce((a, p) => a + p[2], 0) / 4, iv: c.reduce((a, p) => a + p.iv, 0) / 4, shade: 0.6 + 0.52 * light });
       }
       quads.sort((a, b) => b.d - a.d);
-      for (const k of quads) { poly(k.pts); ctx.fillStyle = colour((k.iv - zmin) / zr, k.shade); ctx.fill(); ctx.strokeStyle = "rgba(10,11,13,.4)"; ctx.lineWidth = 0.6; ctx.stroke(); }
+      for (const k of quads) { poly(k.pts); ctx.fillStyle = colour((k.iv - zmin) / zr, k.shade); ctx.fill(); ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 0.6; ctx.stroke(); }
+      // the quoted grid, faintly, along the original strikes and expiries
+      ctx.strokeStyle = "rgba(10,11,13,.32)"; ctx.lineWidth = 0.7;
+      for (let i = 0; i < E.length; i += K) { ctx.beginPath(); P[i].forEach((p, j) => { const [x, y] = to(p); j ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke(); }
+      for (let j = 0; j < M.length; j += K) { ctx.beginPath(); P.forEach((row, i) => { const [x, y] = to(row[j]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke(); }
       // the picked expiry, traced across the surface
       if (picked != null && P[picked]) {
         ctx.strokeStyle = "#EDEBE6"; ctx.lineWidth = 2.5; ctx.lineJoin = "round"; ctx.shadowColor = "rgba(237,235,230,.7)"; ctx.shadowBlur = 8;
@@ -109,8 +138,9 @@
       const nearY = view({ x: 0, y: -1, z: 0 }).depth < view({ x: 0, y: 1, z: 0 }).depth ? -1 : 1;
       const nearX = view({ x: -XW, y: 0, z: 0 }).depth < view({ x: XW, y: 0, z: 0 }).depth ? -1 : 1;
       const side = (p) => (to(p)[0] < W / 2 ? "right" : "left");
-      M.forEach((m, j) => { if (j % (small ? 3 : 2) === 0) text({ x: P[0][j].x, y: nearY * 1.14, z: 0 }, `${Math.round(m * 100)}%`, "center", 5); });
-      E.forEach((e, i) => { if (E.length < 7 || i % 2 === 0 || i === E.length - 1) { const p = { x: nearX * (XW + 0.12), y: P[i][0].y, z: 0 }; text(p, dayLabel(e.days), side(p)); } });
+      M.forEach((m, j) => { if (j % (K * (small ? 3 : 2)) === 0) text({ x: P[0][j].x, y: nearY * 1.14, z: 0 }, `${Math.round(m * 100)}%`, "center", 5); });
+      const nE = coarse.E.length;
+      E.forEach((e, i) => { if (!e.orig) return; const ci = i / K; if (nE < 7 || ci % 2 === 0 || ci === nE - 1) { const p = { x: nearX * (XW + 0.12), y: P[i][0].y, z: 0 }; text(p, dayLabel(e.days), side(p)); } });
       for (const t of [0, 0.5, 1]) { const p = { x: back.x * 1.04, y: back.y * 1.04, z: t * ZH }; text(p, pct(hlo + t * hspan), side(p)); }
       if (!small) { ctx.fillStyle = "rgba(237,235,230,.38)"; text({ x: 0, y: nearY * 1.5, z: 0 }, "strike, % of price now", "center", 6); }
       proj = P.flat().map((p) => { const [x, y] = to(p); return { x, y, p }; });
@@ -143,7 +173,10 @@
       tip._best = best;
     });
     canvas.addEventListener("pointerup", () => {
-      if (drag && !drag.moved && !tip.hidden && tip._best) { api.highlight(tip._best.p.d); opts.onPick?.(tip._best.p.d); }
+      if (drag && !drag.moved && !tip.hidden && tip._best) {
+        const near = coarse.E.reduce((b, e) => (Math.abs(e.days - tip._best.p.d) < Math.abs(b.days - tip._best.p.d) ? e : b), coarse.E[0]);
+        api.highlight(near.days); opts.onPick?.(near.days);
+      }
       drag = null;
     });
     canvas.addEventListener("pointercancel", () => { drag = null; });
@@ -153,8 +186,8 @@
     ro.observe(host);
     const api = {
       destroy() { ro.disconnect(); cancelAnimationFrame(raf); touched = true; host.innerHTML = ""; },
-      highlight(days) { const i = E.findIndex((e) => e.days === days); picked = i >= 0 ? i : null; draw(); },
-      expiries: E, moneyness: M,
+      highlight(days) { const i = E.findIndex((e) => e.orig && e.days === days); picked = i >= 0 ? i : null; draw(); },
+      expiries: coarse.E, moneyness: coarse.M,
     };
     draw();
     raf = requestAnimationFrame(sway);

@@ -46,3 +46,25 @@ def test_recap_text_reads_well():
     assert "Since the open: +0.88% (+£8.33), S&P 500 +0.53%." in text
     assert "bought BHF, sold NBIX" in text and "-0.24 pts against keeping the old mix" in text
     assert "2 of 5 in" in text
+
+
+def test_risk_against_reward_point():
+    prices = [100 * (1.01 if i % 2 else 0.995) ** i for i in range(80)]
+    pt = service._rr_point(prices, 63)
+    assert pt["ret"] == pytest.approx(prices[-1] / prices[-64] - 1)
+    assert pt["swing"] > 0 and pt["vol"] == pytest.approx(pt["swing"] / math.sqrt(63) * math.sqrt(252))
+    assert service._rr_point(prices[:30], 63) is None            # not enough history for the window
+
+
+def test_first_range_is_kept_and_carries_sample_paths(tmp_path):
+    S = make_session_factory(f"sqlite:///{tmp_path / 'mca.db'}")
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(200)]
+    with S() as s:
+        set_meta(s, "yahoo_closes", {"built": "x", "tickers": ["A"], "per_share": {
+            "A": [[d.isoformat(), 100 * (1.01 ** (i % 7))] for i, d in enumerate(days)]}})
+        first = montecarlo.build(s, [("A", 900.0)], cash=100.0, today=date(2026, 11, 12), unit_price=1.0)
+        montecarlo.build(s, [("A", 950.0)], cash=100.0, today=date(2026, 11, 13), unit_price=1.02)
+        from tracker.db import get_meta
+        anchor = get_meta(s, montecarlo.ANCHOR_KEY)
+    assert anchor["value"] == first["value"] == 1000.0 and anchor["unit_price"] == 1.0
+    assert len(first["samples"]) == montecarlo.SAMPLE_PATHS and len(first["samples"][0]) == montecarlo.HORIZON

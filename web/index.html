@@ -8,11 +8,11 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="preload" href="/static/vendor/fonts/inter-tight-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/static/style.css?v=k9">
+<link rel="stylesheet" href="/static/style.css?v=k19">
 <script src="/static/vendor/chart.umd.js" defer></script>
 <script src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js" defer></script>
-<script src="/static/surface.js?v=k5" defer></script>
-<script src="/static/app.js?v=k16" defer></script>
+<script src="/static/surface.js?v=k7" defer></script>
+<script src="/static/app.js?v=k33" defer></script>
 </head>
 <body>
 <div class="aura" aria-hidden="true"><i></i><i></i></div>
@@ -81,6 +81,12 @@
       <div class="h"><h2>What analysts think</h2><span class="meta" id="consensus-meta"></span></div>
       <div class="fill" id="consensus"></div>
     </section>
+    <section class="card s12" id="wf-card" data-money>
+      <div class="h"><h2 id="wf-title">What moved the pie today</h2>
+        <div class="seg" id="wf-mode" role="group" aria-label="Over what period"><button data-wf="day" aria-pressed="true">Today</button><button data-wf="all" aria-pressed="false">Since bought</button></div></div>
+      <p class="meta cal-meta" id="wf-meta"></p>
+      <div class="canvas grow wf-canvas"><canvas id="wf-chart" role="img" aria-label="Waterfall: how each stock added to or took from the pie's value"></canvas></div>
+    </section>
     <section class="card s6" id="recap-card" hidden>
       <div class="h"><h2 id="recap-title">Today's recap</h2><span class="meta" id="recap-meta"></span></div>
       <div id="recap"></div>
@@ -91,7 +97,8 @@
     </section>
     <section class="card s12" id="mc-card" hidden>
       <div class="h"><h2>Where it could go</h2>
-        <div class="seg" id="mc-range" role="group" aria-label="How far ahead"><button data-mc="21" aria-pressed="false">1M</button><button data-mc="63" aria-pressed="true">3M</button><button data-mc="252" aria-pressed="false">1Y</button></div></div>
+        <div class="mc-controls"><div class="seg" id="mc-view" role="group" aria-label="Which range"><button data-mcv="now" aria-pressed="true">From now</button><button data-mcv="start" aria-pressed="false">From the start, with reality</button></div>
+        <div class="seg" id="mc-range" role="group" aria-label="How far ahead"><button data-mc="21" aria-pressed="false">1M</button><button data-mc="63" aria-pressed="true">3M</button><button data-mc="252" aria-pressed="false">1Y</button></div></div></div>
       <p class="sub mc-sub" id="mc-sub"></p>
       <div class="canvas grow mc-canvas"><canvas id="mc-chart" role="img" aria-label="Range of possible values for the pie"></canvas></div>
       <dl class="stats strip" id="mc-stats"></dl>
@@ -122,6 +129,12 @@
       <div class="h"><h2>Weight against the bot's target</h2><span class="meta">percentage points over or under</span></div>
       <div class="canvas grow"><canvas id="drift-chart" role="img" aria-label="How far each holding is from its target weight"></canvas></div>
     </section>
+    <section class="card s12" id="rr-card">
+      <div class="h"><h2>Risk against reward</h2>
+        <div class="seg" id="rr-window" role="group" aria-label="Over what period"><button data-rr="21" aria-pressed="false">1M</button><button data-rr="63" aria-pressed="true">3M</button><button data-rr="252" aria-pressed="false">1Y</button></div></div>
+      <p class="meta cal-meta" id="rr-meta"></p>
+      <div class="canvas grow rr-canvas"><canvas id="rr-chart" role="img" aria-label="Each stock's return against how much it swung, bubbles sized by weight"></canvas></div>
+    </section>
   </div>
 </section>
 
@@ -144,7 +157,9 @@
       <div class="canvas grow"><canvas id="term-chart" role="img" aria-label="At-the-money implied volatility by expiry"></canvas></div>
     </section>
     <section class="card s12" data-stats>
-      <div class="h"><h2>Every trading day</h2><span class="meta" id="cal-meta"></span></div>
+      <div class="h"><h2>Every trading day</h2>
+        <div class="seg" id="cal-tf" role="group" aria-label="Square size"><button data-tf="5">5m</button><button data-tf="15">15m</button><button data-tf="60">1h</button><button data-tf="D">Day</button></div></div>
+      <p class="meta cal-meta" id="cal-meta"></p>
       <div class="cal" id="calendar"></div>
     </section>
     <section class="card s6" data-stats>
@@ -160,8 +175,10 @@
       <div class="corr fill" id="corr"></div>
     </section>
     <section class="card s7" data-stats>
-      <div class="h"><h2>Daily returns</h2><span class="meta" id="hist-meta"></span></div>
-      <div class="canvas grow"><canvas id="hist-chart" role="img" aria-label="Histogram of daily returns against a normal curve"></canvas></div>
+      <div class="h"><h2>Daily returns</h2>
+        <div class="seg" id="hist-tf" role="group" aria-label="Return period"><button data-tf="1">1m</button><button data-tf="5">5m</button><button data-tf="15">15m</button><button data-tf="60">1h</button><button data-tf="D">Day</button></div></div>
+      <p class="meta cal-meta" id="hist-meta"></p>
+      <div class="canvas grow"><canvas id="hist-chart" role="img" aria-label="Histogram of returns against a fitted normal curve"></canvas></div>
     </section>
     <section class="card s7" data-stats>
       <div class="h"><h2>By month</h2><span class="meta" id="month-meta">bot against the S&amp;P 500</span></div>
@@ -179,6 +196,28 @@
       <div class="h"><h2>All the numbers</h2><span class="meta" id="risk-meta"></span></div>
       <dl class="kv four" id="risk-kv"></dl>
     </section>
+    <section class="card s12" data-stats>
+      <div class="h"><h2>Rolling beta and alpha</h2>
+        <div class="seg" id="rb-src" role="group" aria-label="Data"><button data-src="mix" aria-pressed="true">Today's mix, past year</button><button data-src="pie" aria-pressed="false">This pie, minute by minute</button></div></div>
+      <p class="meta cal-meta" id="rb-meta"></p>
+      <div class="canvas grow rb-canvas"><canvas id="rb-chart" role="img" aria-label="Rolling beta against the S&amp;P with its 95% range, and rolling alpha"></canvas></div>
+    </section>
+    <section class="card s6">
+      <div class="h"><h2>What kind of fund is it?</h2><span class="meta" id="fx-meta"></span></div>
+      <p class="meta cal-meta" id="fx-sub"></p>
+      <div class="canvas grow fx-canvas"><canvas id="fx-chart" role="img" aria-label="Exposure to style factors with 95% ranges"></canvas></div>
+    </section>
+    <section class="card s6">
+      <div class="h"><h2>Options' fear against reality</h2><span class="meta" id="opt-meta"></span></div>
+      <p class="meta cal-meta" id="opt-sub"></p>
+      <div class="canvas grow fx-canvas"><canvas id="opt-chart" role="img" aria-label="Implied volatility against realised volatility for each stock"></canvas></div>
+    </section>
+    <section class="card s12">
+      <div class="h"><h2>Do wild moves come in bunches?</h2>
+        <div class="seg" id="acf-src" role="group" aria-label="Data"><button data-src="pie" aria-pressed="true">This pie, minutes</button><button data-src="mix" aria-pressed="false">Today's mix, days</button></div></div>
+      <p class="meta cal-meta" id="acf-meta"></p>
+      <div class="canvas grow rb-canvas"><canvas id="acf-chart" role="img" aria-label="Autocorrelation of returns and of squared returns by lag"></canvas></div>
+    </section>
   </div>
 </section>
 
@@ -192,7 +231,7 @@
   <div class="grid">
     <section class="card s8 r2">
       <div class="h"><h2>Price</h2>
-        <div class="seg" id="s-ranges" role="group" aria-label="Time range"><button data-srange="30" aria-pressed="false">1M</button><button data-srange="91" aria-pressed="false">3M</button><button data-srange="182" aria-pressed="false">6M</button><button data-srange="365" aria-pressed="true">1Y</button><button data-srange="730" aria-pressed="false">2Y</button></div></div>
+        <div class="seg" id="s-ranges" role="group" aria-label="Time range"><button data-srange="1" aria-pressed="false">1D</button><button data-srange="30" aria-pressed="false">1M</button><button data-srange="91" aria-pressed="false">3M</button><button data-srange="182" aria-pressed="false">6M</button><button data-srange="365" aria-pressed="true">1Y</button><button data-srange="730" aria-pressed="false">2Y</button></div></div>
       <div class="canvas grow tall"><canvas id="s-chart" role="img" aria-label="Share price with the bot's trades"></canvas></div>
       <p class="legend foot"><span><i style="background: var(--up)"></i>bot bought</span><span><i style="background: var(--down)"></i>bot sold</span><span id="s-chart-meta"></span></p>
     </section>
