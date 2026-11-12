@@ -1,6 +1,6 @@
 """Before there are 5 daily closes, the statistics come from the pie's own readings."""
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -143,3 +143,47 @@ def test_market_on_the_same_deposits(tmp_path):
     assert sm["return_on_deposits"] == pytest.approx(925 / 1000 - 1)
     # no minute prices cached here: from the close on the deposit day (104) to the latest (104)
     assert sm["bench_on_deposits"]["VUAG.L"]["return"] == pytest.approx(0.0)
+
+
+def test_yesterdays_bar_is_not_scaled_to_todays_price(tmp_path, monkeypatch):
+    """Prices fetched before the open end at yesterday's close: today's move must survive."""
+    days = [date(2026, 11, 10), date(2026, 11, 11)]   # no bar for the 12th yet
+    fake = {"history:AAA": {"points": [{"t": d.isoformat(), "close": c} for d, c in zip(days, [100, 110])]},
+            "history:GBPUSD=X": {"points": [{"t": d.isoformat(), "close": 1.25} for d in days]},
+            "profile:AAA": {"currency": "USD"}}
+    monkeypatch.setattr(market, "get", lambda s, kind, sym, allow_fetch=True: fake.get(f"{kind}:{sym}"))
+    monkeypatch.setattr(market, "yahoo_symbol", lambda s, tk: "AAA")
+    S = make_session_factory(f"sqlite:///{tmp_path / 'y2.db'}")
+    with S() as s:
+        snap = PieSnapshot(ts=datetime(2026, 11, 12, 15), value=79.2, holdings_value=79.2, cash=0.0)
+        snap.holdings = [HoldingSnapshot(ticker="AAA_US_EQ", quantity=1.0, value=79.2)]   # $99 today
+        s.add(snap)
+        s.commit()
+        yahoo_closes.build(s, [("AAA_US_EQ", 1.0, 79.2)], today=date(2026, 11, 12))
+        s.commit()
+        h = service.holdings(s, Settings())["holdings"][0]
+    assert h["day_pct"] == pytest.approx(79.2 / 88 - 1)   # against yesterday's $110 = £88
+
+
+def test_market_line_stays_flat_until_its_first_price(tmp_path, monkeypatch):
+    from tracker import intraday
+    t0 = datetime(2026, 11, 12, 8, 0, tzinfo=timezone.utc)
+    ser = [(datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc), 100.0),
+           (datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc), 99.0)]
+    monkeypatch.setattr(intraday, "gbp_series", lambda s, ticker: ser)
+    pts = service._bench_since(None, Settings(benchmarks=(("VUAG.L", "S&P 500"),)), t0)[0]["points"]
+    assert [p["pct"] for p in pts] == [0.0, 0.0, pytest.approx(-0.01)]
+    assert pts[1]["t"].startswith("2026-11-12T14:29:59")
+
+
+def test_record_starts_at_the_new_york_open(tmp_path):
+    # stocks held from 08:00 (London), flat until 14:30 when New York opens, then moving
+    vals = [900.0] * 390 + [905.0, 910.0, 915.0]
+    S = _readings(tmp_path, vals, start=datetime(2026, 11, 12, 8, 0))
+    with S() as s:
+        r = service.reading_series(s)
+        sm = service.summary(s, Settings(stale_after_s=10**9))
+        h = service.history(s, Settings(stale_after_s=10**9), "ALL")
+    assert r[0][0] == datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc)
+    assert sm["started"].startswith("2026-11-12T14:30")
+    assert h["points"][0]["t"].startswith("2026-11-12T14:30") and len(h["points"]) == 3

@@ -257,15 +257,13 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
     if len(_daily(s)) < DAILY_STATS_FROM:
         # early days: every reading since the pie first held stocks, against the market over
         # the same minutes, for every range (they all cover the whole record so far)
-        readings = reading_series(s)
-        snaps = s.execute(select(PieSnapshot.value, PieSnapshot.cash).order_by(PieSnapshot.ts)).all()
-        snaps = [v + (c or 0.0) for v, c in snaps][-len(readings):] if readings else []  # same readings, in £
+        readings = reading_series(s, with_value=True)
         if len(readings) >= 2:
             t0 = readings[0][0]
             return {"range": rng, "intraday": True, "early": True, "baseline_label": "Start",
                     "benchmarks": _bench_since(s, cfg, t0),
                     # u: unit price, so money moving in or out doesn't show as a gain
-                    "points": [{"t": t.isoformat(), "value": v, "u": u} for (t, u), v in zip(readings, snaps)]}
+                    "points": [{"t": t.isoformat(), "value": v, "u": u} for t, u, v in readings]}
     rows = _daily(s)
     if not rows:
         return {"range": rng, "points": []}
@@ -572,13 +570,24 @@ def activity(s: Session, cfg: Settings, limit: int = 40) -> dict:
 
 
 DAILY_STATS_FROM = 5  # daily closes needed before the statistics use them instead of every reading
-YEAR_S = 365.25 * 86400
 
 
-def reading_series(s: Session) -> list[tuple[datetime, float]]:
-    """The pie's unit price at every reading (holdings + cash), with money in and out taken
-    out, from when it first held stocks. The statistics use it until there are enough daily
-    closes. (Readings are thinned to one an hour after a week.)"""
+NY = ZoneInfo("America/New_York")
+
+
+def in_session(ts: datetime) -> bool:
+    """Is New York open (09:30-16:00 on a weekday)? Most of the pie only moves then."""
+    et = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(NY)
+    return et.weekday() < 5 and (9, 30) <= (et.hour, et.minute) <= (16, 0)
+
+
+def reading_series(s: Session, with_value: bool = False) -> list[tuple]:
+    """The pie's unit price at every reading taken while New York is open (holdings + cash),
+    with money in and out taken out, from the first open after the pie held stocks. Readings
+    outside the session are still used to track money moving, but not shown: the pie barely
+    moves then, and hours of flat readings would drown the statistics. The statistics use this
+    until there are enough daily closes. (Readings are thinned to one an hour after a week.)
+    with_value: (time, unit price, value in GBP) instead of (time, unit price)."""
     snaps = s.execute(select(PieSnapshot.ts, PieSnapshot.value, PieSnapshot.cash).order_by(PieSnapshot.ts)).all()
     while snaps and not (snaps[0][1] or 0) > 0:
         snaps = snaps[1:]
@@ -597,13 +606,20 @@ def reading_series(s: Session) -> list[tuple[datetime, float]]:
                 j += 1
             if f:
                 flows_at.append((ts.replace(tzinfo=timezone.utc), f))
-    return [(r.date, r.unit_price) for r in compute_daily(closes, flows_at)]
+    rows = [r for r in compute_daily(closes, flows_at) if in_session(r.date)]
+    return [(r.date, r.unit_price, r.value) if with_value else (r.date, r.unit_price) for r in rows]
+
+
+SESSION_S = 390 * 60  # a New York session: 09:30 to 16:00
 
 
 def _per_year(series: list) -> float | None:
-    """Readings per year, from the time they span (calendar time, nights included)."""
-    span = (series[-1][0] - series[0][0]).total_seconds()
-    return (len(series) - 1) / (span / YEAR_S) if span > 0 else None
+    """Readings per year of trading: 252 sessions, at the usual spacing between readings."""
+    gaps = sorted((b[0] - a[0]).total_seconds() for a, b in zip(series, series[1:]))
+    gaps = [g for g in gaps if g < 3600] or gaps     # within a session, not overnight
+    if not gaps or gaps[len(gaps) // 2] <= 0:
+        return None
+    return 252 * SESSION_S / gaps[len(gaps) // 2]
 
 
 def _blocks(series: list, tz: ZoneInfo, minutes: int = 15) -> list[dict]:
@@ -693,8 +709,12 @@ def _bench_since(s: Session, cfg: Settings, t0: datetime) -> list[dict]:
         ser = intraday.gbp_series(s, ticker)
         p0 = intraday.at(ser, t0)
         if p0:
-            out.append({"key": ticker, "name": name,
-                        "points": [{"t": t0.isoformat(), "pct": 0.0}] + [{"t": t.isoformat(), "pct": p / p0 - 1} for t, p in ser if t > t0]})
+            later = [(t, p) for t, p in ser if t > t0]
+            pts = [{"t": t0.isoformat(), "pct": 0.0}]
+            if later and (later[0][0] - t0) > timedelta(minutes=5):
+                # the market was shut (e.g. before New York opens): flat until its first price
+                pts.append({"t": (later[0][0] - timedelta(seconds=1)).isoformat(), "pct": 0.0})
+            out.append({"key": ticker, "name": name, "points": pts + [{"t": t.isoformat(), "pct": p / p0 - 1} for t, p in later]})
     return out
 
 

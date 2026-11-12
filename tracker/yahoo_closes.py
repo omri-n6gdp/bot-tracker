@@ -71,11 +71,17 @@ def build(s: Session, holdings: list[tuple[str, float, float]], today: date | No
             gbp = {d: c / r for d, c in closes.items() if (r := _on_or_before(fx, fx_days, d))}
         if not gbp:
             continue
-        # line the level up with what Trading 212 says a share is worth today
-        last = gbp[max(gbp)]
-        k = (v / q) / last if last else 1.0
-        if not 0.5 < k < 2.0:
-            log.warning("yahoo closes: %s price is %.2fx Trading 212's, scaling to match", tk, k)
+        # line the level up with what Trading 212 says a share is worth now, but only against
+        # today's own bar: if Yahoo's latest bar is an earlier day (fetched before the open),
+        # scaling it to today's price would wipe out today's move
+        k = 1.0
+        last_day = max(gbp)
+        if last_day == today and gbp[last_day]:
+            k = (v / q) / gbp[last_day]
+            if not 0.5 < k < 2.0:
+                log.warning("yahoo closes: %s price is %.2fx Trading 212's, scaling to match", tk, k)
+            elif abs(k - 1) < 0.03:
+                k = 1.0  # just today's move since Yahoo's bar: no scaling needed
         per_share[tk] = {d: p * k for d, p in gbp.items() if (today - d).days <= DAYS}
     if not per_share:
         return None
