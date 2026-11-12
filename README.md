@@ -1,7 +1,7 @@
 # Bot tracker
 
 A private website where friends can follow the trading bot's Trading 212 pie live: its value,
-its return against VWRL, what it holds, and every move the bot makes. Only the bot's pie is
+its return against the S&P 500, what it holds, and every move the bot makes. Only the bot's pie is
 shown, never the rest of the ISA. The tracker is read-only: it cannot place or change orders,
 and it doesn't touch the bot.
 

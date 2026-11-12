@@ -74,7 +74,7 @@ class Settings:
     database_url: str = f"sqlite:///{ROOT / 'data' / 'tracker.db'}"
     contributions_csv: Path = ROOT / "contributions.csv"
     # comparison lines: Yahoo ticker -> name (GBP-priced, accumulating = total return)
-    benchmarks: tuple = (("VUAG.L", "S&P 500"), ("VWRL.L", "FTSE All-World"))
+    benchmarks: tuple = (("VUAG.L", "S&P 500"),)
     timezone: str = "Europe/London"
     daily_close_time: str = "21:30"  # local time, after the US close
     stale_after_s: int = 600
@@ -126,7 +126,7 @@ class Settings:
 
 
 def _parse_benchmarks(text: str | None) -> tuple:
-    """"VUAG.L=S&P 500, VWRL.L=FTSE All-World" -> (("VUAG.L","S&P 500"), ...)"""
+    """"VUAG.L=S&P 500, CSPX.L=S&P 500 (USD)" -> (("VUAG.L","S&P 500"), ...)"""
     if not text:
         return ()
     out = []

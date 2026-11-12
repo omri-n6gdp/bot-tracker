@@ -259,18 +259,19 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
                 "benchmarks": _bench_since(s, cfg, rows[0].date),
                 # the whole New York session, so the chart fills in across the day like it did live
                 "session": _session_bounds(rows[0].date.astimezone(tz).date()),
-                "points": [{"t": r.date.isoformat(), "value": r.value, "u": r.unit_price} for r in rows]}
+                "points": hold_flat([{"t": r.date.isoformat(), "value": r.value, "u": r.unit_price} for r in rows])}
     if len(_daily(s)) < DAILY_STATS_FROM:
         # early days: every reading since the pie first held stocks, against the market over
         # the same minutes, for every range (they all cover the whole record so far)
-        readings = reading_series(s, with_value=True, cfg=cfg)
+        # the charts show every reading, around the clock (statistics use trading hours only)
+        readings = reading_series(s, with_value=True, cfg=cfg, all_hours=True)
         if len(readings) >= 2:
             t0, dep = readings[0][0], deposits(s)
             if dep:
                 # 0% = break-even: worth what's been paid in; the market on the same money
                 at = lambda t: deposits_at(dep, t.astimezone(tz).date())
                 bench = [{"key": tk, "name": dict(cfg.benchmarks)[tk],
-                          "points": [{"t": t.isoformat(), "pct": v / at(t) - 1} for t, v in path if at(t)]}
+                          "points": hold_flat([{"t": t.isoformat(), "pct": v / at(t) - 1, **({"f": 1} if k == "fut" else {})} for t, v, k in path if at(t)])}
                          for tk, path in _bench_paths(s, cfg, dep, t0, tz).items()]
                 # where the money started: break-even at New York's open on the first day
                 op = _session_bounds(t0.astimezone(NY).date())["open"]
@@ -278,11 +279,11 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
                         "origin": op if datetime.fromisoformat(op) < t0 else None,
                         "baseline_label": f"Break-even ({gbp_text(deposits_at(dep, readings[-1][0].astimezone(tz).date()))} paid in)",
                         "benchmarks": bench,
-                        "points": [{"t": t.isoformat(), "value": v, "u": u, "dep": at(t)} for t, u, v in readings]}
+                        "points": hold_flat([{"t": t.isoformat(), "value": v, "u": u, "dep": at(t)} for t, u, v in readings])}
             return {"range": rng, "intraday": True, "early": True, "baseline_label": "Start",
                     "benchmarks": _bench_since(s, cfg, t0),
                     # u: unit price, so money moving in or out doesn't show as a gain
-                    "points": [{"t": t.isoformat(), "value": v, "u": u} for t, u, v in readings]}
+                    "points": hold_flat([{"t": t.isoformat(), "value": v, "u": u} for t, u, v in readings])}
     rows = _daily(s)
     if not rows:
         return {"range": rng, "points": []}
@@ -630,9 +631,11 @@ NY = ZoneInfo("America/New_York")
 
 
 def in_session(ts: datetime) -> bool:
-    """Is New York open (09:30-16:00 on a weekday)? Most of the pie only moves then."""
+    """Is the pie moving: from New York's open (09:30) through its after-hours session (to 20:00,
+    01:00 UK) on a weekday? Trading 212 keeps pricing US stocks after the close. Before the open
+    the pie's value barely changes, so those readings are left out."""
     et = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(NY)
-    return et.weekday() < 5 and (9, 30) <= (et.hour, et.minute) <= (16, 0)
+    return et.weekday() < 5 and (9, 30) <= (et.hour, et.minute) <= (20, 0)
 
 
 def record_start(cfg: Settings | None) -> datetime | None:
@@ -673,15 +676,17 @@ def _all_readings(s: Session, cfg: Settings | None = None) -> tuple[list[DailyRo
     return compute_daily(closes, flows_at), flows_at
 
 
-def reading_series(s: Session, with_value: bool = False, cfg: Settings | None = None) -> list[tuple]:
+def reading_series(s: Session, with_value: bool = False, cfg: Settings | None = None,
+                   all_hours: bool = False) -> list[tuple]:
     """The pie's unit price at every reading taken while New York is open (holdings + cash),
     with money in and out taken out, from the first open after the pie held stocks. Readings
     outside the session are still used to track money moving, but not shown: the pie barely
     moves then, and hours of flat readings would drown the statistics. The statistics use this
     until there are enough daily closes. (Readings are thinned to one an hour after a week.)
-    with_value: (time, unit price, value in GBP) instead of (time, unit price)."""
+    with_value: (time, unit price, value in GBP) instead of (time, unit price).
+    all_hours: every reading, around the clock (the charts); otherwise trading hours only."""
     rows, _ = _all_readings(s, cfg)
-    rows = [r for r in rows if in_session(r.date)]
+    rows = rows if all_hours else [r for r in rows if in_session(r.date)]
     return [(r.date, r.unit_price, r.value) if with_value else (r.date, r.unit_price) for r in rows]
 
 
@@ -708,6 +713,23 @@ def _today_rows(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | Non
     if any(r.date >= ny_open for r in rows):
         return [r for r in rows if r.date >= ny_open], True
     return rows, False
+
+
+HOLD_GAP_S = 360   # readings further apart than 6 minutes: the line holds flat through the gap
+
+
+def hold_flat(points: list[dict]) -> list[dict]:
+    """Where points are more than HOLD_GAP_S apart (the tracker was off, the market shut, or
+    Trading 212 didn't reprice), repeat the last value just before the next point, so the chart
+    runs flat through the gap and then moves, instead of slanting or breaking."""
+    out = []
+    for i, p in enumerate(points):
+        if i:
+            t0, t1 = datetime.fromisoformat(points[i - 1]["t"]), datetime.fromisoformat(p["t"])
+            if (t1 - t0).total_seconds() > HOLD_GAP_S:
+                out.append({**points[i - 1], "t": (t1 - timedelta(seconds=1)).isoformat(), "held": 1})
+        out.append(p)
+    return out
 
 
 def _session_bounds(day: date) -> dict:
@@ -740,19 +762,20 @@ def _bench_paths(s: Session, cfg: Settings, dep: list, started: datetime | None,
     first_day_later = sum(f for t, f in later if t.astimezone(tz).date() == start_day)
     out = {}
     for ticker, _name in cfg.benchmarks:
-        minute = intraday.gbp_series(s, ticker)
+        src = intraday.gbp_series_src(s, ticker)
+        minute = [(t, p) for t, p, _ in src]
         p0 = intraday.at(minute, started) if minute else None
         if not p0 or not all(intraday.at(minute, t) for t, _ in later):
             continue
-        units, j, path = max(0.0, first - first_day_later) / p0, 0, [(started, max(0.0, first - first_day_later))]
-        for t, price in minute:
+        units, j, path = max(0.0, first - first_day_later) / p0, 0, [(started, max(0.0, first - first_day_later), "spot")]
+        for t, price, k in src:
             if t <= started:
                 continue
             while j < len(later) and later[j][0] <= t:
                 units += later[j][1] / intraday.at(minute, later[j][0])
                 j += 1
-            path.append((t, units * price))
-        out[ticker] = path
+            path.append((t, units * price, k))
+        out[ticker] = path      # (time, value, "spot" or "fut")
     return out
 
 
@@ -799,15 +822,17 @@ def _bench_since(s: Session, cfg: Settings, t0: datetime, t1: datetime | None = 
     """Each benchmark's minute prices from t0 on, as % change since t0."""
     out = []
     for ticker, name in cfg.benchmarks:
-        ser = intraday.gbp_series(s, ticker)
+        src = intraday.gbp_series_src(s, ticker)
+        ser = [(t, p) for t, p, _ in src]
         p0 = intraday.at(ser, t0)
         if p0:
-            later = [(t, p) for t, p in ser if t > t0 and (t1 is None or t <= t1)]
+            later = [(t, p, k) for t, p, k in src if t > t0 and (t1 is None or t <= t1)]
             pts = [{"t": t0.isoformat(), "pct": 0.0}]
             if later and (later[0][0] - t0) > timedelta(minutes=5):
-                # the market was shut (e.g. before New York opens): flat until its first price
+                # the market was shut: flat until its first price
                 pts.append({"t": (later[0][0] - timedelta(seconds=1)).isoformat(), "pct": 0.0})
-            out.append({"key": ticker, "name": name, "points": pts + [{"t": t.isoformat(), "pct": p / p0 - 1} for t, p in later]})
+            # "f": from index futures, while the fund that tracks the index isn't trading
+            out.append({"key": ticker, "name": name, "points": hold_flat(pts + [{"t": t.isoformat(), "pct": p / p0 - 1, **({"f": 1} if k == "fut" else {})} for t, p, k in later])})
     return out
 
 
@@ -1088,11 +1113,12 @@ def stock_intraday(s: Session, cfg: Settings, ticker: str) -> dict | None:
         return {"ticker": ticker, "points": []}
     day = pts[-1][0].astimezone(NY).date()
     ny_open = datetime.combine(day, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY)
-    today = [(t, c) for t, c in pts if t >= ny_open]
-    before = [c for t, c in pts if t < ny_open]
+    today = [(t, c) for t, c in pts if t >= ny_open]          # the session and after hours
+    # the close before: the last regular-session price before today (not pre-market or after hours)
+    before = [c for t, c in pts if t < ny_open and (9, 30) <= (t.astimezone(NY).hour, t.astimezone(NY).minute) <= (16, 0)]
     return {"ticker": ticker, "symbol": sym, "session": day.isoformat(),
             "open": today[0][1] if today else None, "prev_close": before[-1] if before else None,
-            "points": [{"t": t.isoformat(), "price": c} for t, c in today]}
+            "points": hold_flat([{"t": t.isoformat(), "price": c} for t, c in today])}
 
 
 def stock_detail(s: Session, cfg: Settings, ticker: str) -> dict | None:

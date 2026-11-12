@@ -81,7 +81,7 @@ const data = {
   quant: () => load("quant", "/api/quant"),
 };
 const benchKey = (s) => Object.keys(s?.benchmarks || {})[0];
-const shortBench = (n) => ({ "S&P 500": "S&P", "FTSE All-World": "World" }[n] || n || "market");
+const shortBench = (n) => ({ "S&P 500": "S&P" }[n] || n || "market");
 const held = () => (state.holdingsData?.holdings || []).filter((h) => h.value > 0);
 
 /* ================= charts ================= */
@@ -364,7 +364,8 @@ async function loadChart(animate = !state.chartShown) {
   const box = $("#toggles");
   const chips = state.bench.filter((b) => !h.intraday || h.benchmarks?.some((x) => x.key === b.key))
     .map((b) => `<button class="chip" data-bench="${esc(b.key)}" aria-pressed="${b.on}"><i style="background:${bc[state.bench.indexOf(b) % 2]}"></i>${esc(b.name)}</button>`).join("");
-  box.innerHTML = `<span><i style="background:${COL.amber}"></i>The bot</span>` + chips + (h.intraday ? `<span><i style="background:${COL.faint}"></i>${esc(h.baseline_label || "Yesterday's close")}</span>`
+  const usesFut = h.intraday && (h.benchmarks || []).some((b) => state.bench.find((x) => x.key === b.key && x.on) && b.points?.some((p) => p.f));
+  box.innerHTML = `<span><i style="background:${COL.amber}"></i>The bot</span>` + chips + (usesFut ? `<span title="Dashed: no S&P 500 fund was trading (roughly 01:00-08:00 UK), so the line follows S&P 500 futures, which trade nearly around the clock."><i class="dash" style="border-color:${COL.blue}"></i>S&P futures, funds shut</span>` : "") + (h.intraday ? `<span><i style="background:${COL.faint}"></i>${esc(h.baseline_label || "Yesterday's close")}</span>`
     : (h.has_deposits ? `<span><i style="background:${COL.faint}"></i>Break-even</span>` : "") + `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`);
   $$("[data-bench]", box).forEach((el) => el.addEventListener("click", () => { const b = state.bench.find((x) => x.key === el.dataset.bench); b.on = !b.on; loadChart(false); }));
   let datasets, yFmt;
@@ -378,7 +379,7 @@ async function loadChart(animate = !state.chartShown) {
     yFmt = pct2;
     datasets = [{ label: h.early ? "The bot" : "Today", data: d, borderColor: COL.amber, backgroundColor: areaFill(COL.amber), fill: "origin", borderWidth: 2.2, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, glow: true, tag: pct2 }];
     // the market over the same minutes, from the same starting point
-    state.bench.forEach((b, i) => { const hb = b.on && h.benchmarks?.find((x) => x.key === b.key); if (hb?.points?.length) datasets.push({ label: b.name, data: hb.points.map((p) => ({ x: new Date(p.t).getTime(), y: p.pct })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, order: 2, tag: pct2 }); });
+    state.bench.forEach((b, i) => { const hb = b.on && h.benchmarks?.find((x) => x.key === b.key); if (hb?.points?.length) datasets.push({ label: b.name, segment: FUT_DASH, data: hb.points.map((p) => ({ x: new Date(p.t).getTime(), y: p.pct, f: p.f })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, order: 2, tag: pct2 }); });
     // where the money started: break-even, straight down (or up) to the bot's first reading
     if (h.origin && d.length) datasets.push({ label: "Start", data: [{ x: d[0].x, y: 0 }, d[0]], borderColor: COL.amber, borderWidth: 2.2, pointRadius: [3.5, 0], pointBackgroundColor: COL.amber, pointHoverRadius: 0, noScrub: true, order: 1 });
     if (d.length) datasets.push({ label: h.baseline_label || "Yesterday's close", data: [{ x: h.session && !h.early ? new Date(h.session.open).getTime() : d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
@@ -739,6 +740,9 @@ async function loadWaterfall() {
 }
 $$("#wf-mode button").forEach((b) => b.addEventListener("click", () => { state.wf = b.dataset.wf; loadWaterfall(); }));
 
+// dashed where a market line comes from index futures (the fund that tracks it wasn't trading)
+const FUT_DASH = { borderDash: (ctx) => (ctx.p1?.raw?.f ? [5, 4] : undefined) };
+
 /* ================= the weekly prediction game ================= */
 const LS = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 async function loadGame(st) {
@@ -967,7 +971,7 @@ async function loadQuant() {
   wait.hidden = !!a.ready && !rd;
   $$("#view-quant [data-stats]").forEach((el) => (el.hidden = !a.ready));
   if (!a.ready) { wait.innerHTML = `<h2>Not enough history yet</h2><p class="sub">The statistics need at least a week of daily values. The volatility surface below works already.</p>`; return; }
-  if (rd) wait.innerHTML = `<p class="sub"><b>Early figures.</b> Worked out from this pie's own value every minute since ${timeF.format(new Date(rd.from))} on ${dShort(rd.from)} (${rd.readings.toLocaleString("en-GB")} readings), scaled up to a year, so they'll swing a lot at first. The market comparisons use the S&P and FTSE minute by minute too. From the fifth daily close everything switches to daily closes.</p>`;
+  if (rd) wait.innerHTML = `<p class="sub"><b>Early figures.</b> Worked out from this pie's own value every minute since ${timeF.format(new Date(rd.from))} on ${dShort(rd.from)} (${rd.readings.toLocaleString("en-GB")} readings), scaled up to a year, so they'll swing a lot at first. The comparisons with the S&P use its minute prices too. From the fifth daily close everything switches to daily closes.</p>`;
   const s = state.summary, bk = benchKey(s), v = a.vs?.[bk] || {}, bn = shortBench(v.name), W_ = warn(thinWhy(a));
   const R = a.returns, K = a.risk, Q = a.ratios, S = a.significance, M = a.moves || {}, P = h.points || [];
   $("#quant-stats").innerHTML = [

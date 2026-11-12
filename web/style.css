@@ -402,3 +402,4 @@ footer { margin-top: 22px; display: flex; flex-wrap: wrap; justify-content: spac
 .fx-canvas { min-height: 320px; }
 /* explanations under a chart's title read left to right */
 #rb-meta, #fx-sub, #opt-sub, #acf-meta, #rr-meta, #wf-meta, #hist-meta, #cal-meta { text-align: left; }
+.legend i.dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; border-radius: 0; }

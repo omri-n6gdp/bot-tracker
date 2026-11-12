@@ -175,4 +175,4 @@ def test_today_chart_skips_readings_before_the_pie_had_money(tmp_path):
             s.add(PieSnapshot(ts=datetime(2026, 11, 12, hh), value=v, holdings_value=v))
         s.commit()
         pts = service.history(s, Settings(database_url=url), "1D")["points"]
-    assert [p["value"] for p in pts] == [900.0, 910.0]
+    assert [p["value"] for p in pts if not p.get("held")] == [900.0, 910.0]

@@ -113,7 +113,6 @@ def seed(days: int = 200, seed_: int = 7, url: str = DEMO_URL, today: date | Non
             for t, (_, mu, sig, _) in TICKERS.items():
                 prices[t] *= math.exp((mu - sig ** 2 / 2) * dt + sig * math.sqrt(dt) * rng.gauss(0, 1))
             bench *= math.exp((0.08 - 0.15 ** 2 / 2) * dt + 0.15 * math.sqrt(dt) * rng.gauss(0, 1))
-            s.add(BenchmarkPrice(ticker="VWRL.L", date=day, close=bench))
             s.add(BenchmarkPrice(ticker="VUAG.L", date=day, close=bench * 0.9 * (1 + 0.0004 * i)))
             value = sum(qty[t] * prices[t] for t in TICKERS) + cash
             if day in flows:

@@ -170,13 +170,14 @@ def test_market_line_stays_flat_until_its_first_price(tmp_path, monkeypatch):
     t0 = datetime(2026, 11, 12, 8, 0, tzinfo=timezone.utc)
     ser = [(datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc), 100.0),
            (datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc), 99.0)]
-    monkeypatch.setattr(intraday, "gbp_series", lambda s, ticker: ser)
+    monkeypatch.setattr(intraday, "gbp_series_src", lambda s, ticker: [(a, b, "spot") for a, b in ser])
     pts = service._bench_since(None, Settings(benchmarks=(("VUAG.L", "S&P 500"),)), t0)[0]["points"]
-    assert [p["pct"] for p in pts] == [0.0, 0.0, pytest.approx(-0.01)]
-    assert pts[1]["t"].startswith("2026-11-12T14:29:59")
+    real = [p for p in pts if not p.get("held")]
+    assert [p["pct"] for p in real] == [0.0, 0.0, pytest.approx(-0.01)]
+    assert real[1]["t"].startswith("2026-11-12T14:29:59")
 
 
-def test_record_starts_at_the_new_york_open(tmp_path):
+def test_statistics_start_at_the_new_york_open(tmp_path):
     # stocks held from 08:00 (London), flat until 14:30 when New York opens, then moving
     vals = [900.0] * 390 + [905.0, 910.0, 915.0]
     S = _readings(tmp_path, vals, start=datetime(2026, 11, 12, 8, 0))
@@ -184,9 +185,10 @@ def test_record_starts_at_the_new_york_open(tmp_path):
         r = service.reading_series(s)
         sm = service.summary(s, Settings(stale_after_s=10**9))
         h = service.history(s, Settings(stale_after_s=10**9), "ALL")
-    assert r[0][0] == datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc)
+    assert r[0][0] == datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc)   # statistics: from the open
     assert sm["started"].startswith("2026-11-12T14:30")
-    assert h["points"][0]["t"].startswith("2026-11-12T14:30") and len(h["points"]) == 3
+    # the chart is 24/7: from the first reading with stocks in the pie (no start time set here)
+    assert h["points"][0]["t"].startswith("2026-11-12T08:00") and len(h["points"]) == 393
 
 
 def test_record_can_start_at_a_set_time(tmp_path):
@@ -232,6 +234,7 @@ def test_market_comparison_puts_money_in_when_it_arrived(tmp_path, monkeypatch):
     # S&P: 100 at the open, 110 by 14:35 when £400 arrives, 110 now
     ser = [(datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc), 100.0),
            (datetime(2026, 11, 12, 14, 35, tzinfo=timezone.utc), 110.0)]
+    monkeypatch.setattr(intraday, "gbp_series_src", lambda s, ticker: [(a, b, "spot") for a, b in ser])
     monkeypatch.setattr(intraday, "gbp_series", lambda s, ticker: ser)
     S = _readings(tmp_path, [500.0] * 5 + [900.0] * 5, cash=0.0, buys=[(5, 400.0)])
     with S() as s:
@@ -265,7 +268,8 @@ def test_stock_minute_prices_from_its_open(tmp_path, monkeypatch):
         s.commit()
         d = service.stock_intraday(s, Settings(), "AAA_US_EQ")
         assert service.stock_intraday(s, Settings(), "NOPE_US_EQ") is None
-    assert d["session"] == "2026-11-12" and d["open"] == 150.0 and d["prev_close"] == 173.0 and len(d["points"]) == 2
+    assert d["session"] == "2026-11-12" and d["open"] == 150.0 and d["prev_close"] == 173.0
+    assert len([p for p in d["points"] if not p.get("held")]) == 2
 
 
 def test_break_even_charts_start_from_the_first_open(tmp_path):
@@ -277,3 +281,54 @@ def test_break_even_charts_start_from_the_first_open(tmp_path):
         s.commit()
         h = service.history(s, Settings(stale_after_s=10**9), "ALL")
     assert h["origin"] == "2026-11-12T14:30:00+00:00"   # 09:30 in New York
+
+
+def test_after_hours_count_but_pre_market_does_not():
+    utc = timezone.utc
+    assert service.in_session(datetime(2026, 11, 12, 14, 30, tzinfo=utc))       # 09:30 New York: the open
+    assert service.in_session(datetime(2026, 11, 12, 22, 0, tzinfo=utc))        # 17:00: after hours
+    assert not service.in_session(datetime(2026, 11, 12, 13, 0, tzinfo=utc))    # 08:00: pre-market
+    assert not service.in_session(datetime(2026, 11, 13, 1, 30, tzinfo=utc))    # 20:30: after-hours over
+    assert not service.in_session(datetime(2026, 11, 14, 15, 0, tzinfo=utc))    # Saturday
+
+
+def test_charts_show_every_reading_around_the_clock(tmp_path):
+    from datetime import date as d_
+    from tracker.db import Contribution
+    # 14:30 to 21:00 UK on Thursday, then readings overnight to 03:00 on Friday
+    S = _readings(tmp_path, [900.0 + (i % 7) for i in range(390)], start=datetime(2026, 11, 12, 14, 30))
+    with S() as s:
+        for k in range(6):
+            s.add(PieSnapshot(ts=datetime(2026, 11, 12, 21, 30) + timedelta(hours=k), value=903.0, holdings_value=903.0, cash=20.0))
+        s.add(Contribution(date=d_(2026, 11, 12), amount=950.0, note="in"))
+        s.commit()
+        h = service.history(s, Settings(stale_after_s=10**9), "ALL")
+        stats_readings = service.reading_series(s)
+    assert h["points"][-1]["t"].startswith("2026-11-13T02:30")         # overnight readings are charted
+    assert stats_readings[-1][0].hour < 2                               # statistics stop at 20:00 New York
+
+
+def test_sp_line_uses_futures_only_while_the_fund_is_shut(tmp_path, monkeypatch):
+    from tracker import intraday
+    utc = timezone.utc
+    T = lambda h, m=0: datetime(2026, 11, 13, h, m, tzinfo=utc)
+    fund = [(T(0, 0), 100.0), (T(0, 1), 101.0)]                                     # trading until 00:01
+    fut = [(T(0, 0), 5000.0), (T(0, 30), 5050.0), (T(1, 0), 5100.0), (T(9, 0), 5100.0)]
+    later = [(T(9, 0), 104.0), (T(9, 1), 105.04)]                                   # the fund again from 09:00
+    data = {"SPY": fund + later, "ES=F": fut}
+    monkeypatch.setattr(intraday, "_series", lambda s, sym: data.get(sym, []))
+    monkeypatch.setattr(intraday, "_to_gbp", lambda s, px, ccy: px)                 # skip the exchange rate
+    out = intraday.gbp_series_src(None, "VUAG.L")
+    assert [k for _, _, k in out] == ["spot", "spot", "fut", "fut", "spot", "spot"]
+    v = {t: p for t, p, _ in out}
+    assert v[T(0, 30)] == pytest.approx(101.0 * 5050 / 5000)                        # futures carry the move on
+    assert v[T(1, 0)] == pytest.approx(101.0 * 5100 / 5000)
+    assert v[T(9, 0)] == pytest.approx(v[T(1, 0)])            # futures flat 01:00-09:00: no jump, nothing counted twice
+    assert v[T(9, 1)] / v[T(9, 0)] == pytest.approx(1.01)
+
+
+def test_gaps_hold_flat():
+    pts = [{"t": "2026-11-12T20:00:00+00:00", "u": 1.0}, {"t": "2026-11-12T20:01:00+00:00", "u": 1.01},
+           {"t": "2026-11-12T21:00:00+00:00", "u": 1.02}]
+    out = service.hold_flat(pts)
+    assert len(out) == 4 and out[2] == {"t": "2026-11-12T20:59:59+00:00", "u": 1.01, "held": 1}
