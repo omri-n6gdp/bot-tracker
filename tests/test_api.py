@@ -161,3 +161,18 @@ def test_analyst_rating_comes_from_the_score_when_yahoo_gives_none():
     assert b["rating"] is None and b["thin"] is True
     assert _analyst({"currentPrice": 10.0}) is None
     assert _analyst({"recommendationKey": "underperform", "recommendationMean": 3.8, "currentPrice": 5})["rating"] == "Underperform"
+
+
+def test_today_chart_skips_readings_before_the_pie_had_money(tmp_path):
+    """Overnight the new pie read £0; the 1D line is drawn relative to its first point,
+    so a £0 first point made the whole line flat at 0%."""
+    from tracker import service
+    from tracker.db import PieSnapshot
+    url = f"sqlite:///{tmp_path / 't.db'}"
+    S = make_session_factory(url)
+    with S() as s:
+        for hh, v in [(1, 0.0), (2, 0.0), (15, 900.0), (16, 910.0)]:
+            s.add(PieSnapshot(ts=datetime(2026, 11, 12, hh), value=v, holdings_value=v))
+        s.commit()
+        pts = service.history(s, Settings(database_url=url), "1D")["points"]
+    assert [p["value"] for p in pts] == [900.0, 910.0]

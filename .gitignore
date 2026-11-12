@@ -22,3 +22,4 @@ _to_delete/
 /*.csv
 *.db
 .DS_Store
+deploy/.hosted

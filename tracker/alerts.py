@@ -28,6 +28,19 @@ def send(text: str) -> bool:
         return False
 
 
+def send_message(text: str) -> bool:
+    """A plain message to the Telegram chat (the daily recap). False if Telegram isn't set up."""
+    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not (token and chat):
+        return False
+    try:
+        r = httpx.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                       json={"chat_id": chat, "text": text, "disable_web_page_preview": True}, timeout=10)
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 class FailureTracker:
     def __init__(self, sender=send):
         self.streak: dict[str, int] = {}

@@ -1,5 +1,6 @@
-"""Read-only web API + the dashboard. Every route is GET: visitors can't change anything
-and nothing here talks to Trading 212. Access control sits in front (Cloudflare Access).
+"""Web API + the dashboard. Every route is GET except the prediction game's guess: that's
+the only thing visitors can write, into this tracker's own database. Nothing here talks to
+Trading 212. Access control sits in front (Cloudflare Access).
 """
 from __future__ import annotations
 
@@ -15,11 +16,18 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from . import service
+from pydantic import BaseModel, Field
+
+from . import game, service
 from .config import ROOT, Settings, get_settings
-from .db import PieSnapshot, make_session_factory
+from .db import PieSnapshot, get_meta, make_session_factory
 
 WEB = ROOT / "web"
+
+
+class GuessIn(BaseModel):
+    player: str = Field(..., max_length=40)
+    guess: float  # percent: 1.5 = +1.5%
 CACHE_TTL = 15.0
 
 
@@ -105,6 +113,30 @@ def create_app(cfg: Settings | None = None, Session_: sessionmaker[Session] | No
     @app.get("/api/correlations")
     def correlations():
         return cached("correlations", lambda s: service.correlations(s, cfg))
+
+    @app.get("/api/montecarlo")
+    def monte_carlo():
+        return cached("montecarlo", lambda s: get_meta(s, "monte_carlo") or {"ready": False})
+
+    @app.get("/api/recap")
+    def recap():
+        return cached("recap", lambda s: service.recap(s, cfg))
+
+    # the prediction game: the one thing friends can write (guesses go in this tracker's own
+    # database; nothing ever goes to Trading 212)
+    @app.get("/api/game")
+    def game_state():
+        with SessionF() as s:
+            return game.state(s, cfg)
+
+    @app.post("/api/game/guess")
+    def game_guess(body: GuessIn):
+        with SessionF() as s:
+            try:
+                game.guess(s, cfg, body.player, body.guess)
+            except game.GuessError as exc:
+                raise HTTPException(400, str(exc))
+            return game.state(s, cfg)
 
     @app.get("/api/health")
     def health():

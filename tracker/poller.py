@@ -329,6 +329,72 @@ class Poller:
             s.commit()
         return n
 
+    def build_yahoo_closes(self, force: bool = False) -> bool:
+        """Yahoo daily closes for the current holdings (see yahoo_closes.py): yesterday's close
+        while the pie has none of its own, sparklines, correlations. Every 6 h, or sooner when
+        the holdings change. No Trading 212 calls."""
+        from . import yahoo_closes
+        with self.Session() as s:
+            snap = service.latest_snapshot(s)
+            held = [(h.ticker, h.quantity, h.value) for h in snap.holdings if (h.value or 0) > 0] if snap else []
+            if not held:
+                return False
+            old = get_meta(s, yahoo_closes.META_KEY)
+            if old and not force:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(old["built"])
+                same = set(old.get("tickers", [])) | set(old.get("left_out", [])) == {t for t, *_ in held}
+                if same and age < timedelta(hours=6):
+                    return False
+            built = yahoo_closes.build(s, held)
+            self._ok(s, "yahoo_closes")
+            s.commit()
+            if built:  # the range of outcomes uses these closes and today's weights
+                from . import montecarlo
+                montecarlo.build(s, [(tk, v) for tk, _, v in held], snap.cash or 0.0)
+                s.commit()
+        log.info("yahoo closes %s", f"for {len(built['tickers'])} holdings" if built else "not available")
+        return bool(built)
+
+    def send_recap(self) -> dict | None:
+        """At the daily close: save today's recap for the site and send it to Telegram."""
+        from . import alerts, moves
+        with self.Session() as s:
+            try:
+                moves.value_added(s)       # fresh "did it help" for today's moves
+                s.commit()
+            except Exception as exc:       # the recap still goes out without it
+                log.warning("couldn't judge moves for the recap: %s", exc)
+            r = service.build_recap(s, self.cfg)
+            if not r:
+                return None
+            r["final"] = True
+            saved = [x for x in (get_meta(s, service.RECAPS_KEY, []) or []) if x["date"] != r["date"]]
+            set_meta(s, service.RECAPS_KEY, (saved + [r])[-30:])
+            s.commit()
+        alerts.send_message(r["text"])
+        return r
+
+    def judge_moves(self) -> int:
+        """Every 15 minutes: did each move help (new mix against old), and headlines for
+        recent moves while Yahoo still has them. No Trading 212 calls."""
+        from . import moves
+        with self.Session() as s:
+            n = len(moves.value_added(s))
+            s.commit()
+            moves.collect_news(s)
+            self._ok(s, "moves")
+            s.commit()
+        return n
+
+    def refresh_intraday(self) -> int:
+        """Every 2 minutes: the benchmarks' minute prices, for the 1D chart and early figures."""
+        from . import intraday
+        with self.Session() as s:
+            n = intraday.refresh(s, [t for t, _ in self.cfg.benchmarks])
+            self._ok(s, "intraday")
+            s.commit()
+        return n
+
     def refresh_news(self) -> int:
         """Every 30 minutes: headlines for the stocks held now, for the home page's news."""
         from . import market
@@ -392,6 +458,9 @@ class Poller:
             "news": (1800, self.refresh_news),
             "benchmark": (6 * 3600, self.update_benchmark),
             "contributions": (300, self.sync_contributions),
+            "yahoo_closes": (300, self.build_yahoo_closes),
+            "intraday": (120, self.refresh_intraday),
+            "moves": (900, self.judge_moves),
         }
         next_run = {k: 0.0 for k in jobs}
         last_close_day = None
@@ -413,6 +482,7 @@ class Poller:
                 try:
                     self.snapshot(daily_close=True)
                     self.recompute()
+                    self.send_recap()
                     self.prune()
                     last_close_day = today
                     self.failures.ok("daily_close")

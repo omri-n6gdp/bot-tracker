@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import random
 from bisect import bisect_right
-from datetime import date
+from datetime import date, datetime
 from statistics import mean
 
 from . import mathx
@@ -203,19 +203,21 @@ def drawdown_stats(series: list[tuple[date, float]]) -> dict:
 # ---------- main ------------------------------------------------------------
 
 def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, list[tuple[date, float]]]],
-            move_days: list[date], rf_annual: float = 0.0) -> dict:
+            move_days: list[date], rf_annual: float = 0.0, periods_per_year: float = TD) -> dict:
+    """periods_per_year: T for daily closes; more for intraday readings (see service)."""
     if len(series) < 5:
         return {"ready": False, "reason": "needs at least a week of daily data"}
+    T = periods_per_year
     prices = [p for _, p in series]
     r = returns(prices)
     n = len(r)
-    rf_d = rf_annual / TD
+    rf_d = rf_annual / T
     years = (series[-1][0] - series[0][0]).days / 365.25
     total = prices[-1] / prices[0] - 1
     sd = sample_std(r)
-    vol = sd * math.sqrt(TD)
-    downside = math.sqrt(sum(min(0.0, v - rf_d) ** 2 for v in r) / n) * math.sqrt(TD)
-    ann_mean = mean(r) * TD
+    vol = sd * math.sqrt(T)
+    downside = math.sqrt(sum(min(0.0, v - rf_d) ** 2 for v in r) / n) * math.sqrt(T)
+    ann_mean = mean(r) * T
     g3, g4 = skew_kurt(r)
     dd = drawdown_stats(series)
     cagr = (1 + total) ** (1 / years) - 1 if years >= 0.25 else None
@@ -257,8 +259,8 @@ def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, l
 
     # significance of the bot's own returns
     t, p = t_test_mean([v - rf_d for v in r])
-    boot_ret = block_bootstrap(r, lambda x: mean(x) * TD)
-    boot_sr = block_bootstrap(r, lambda x: (mean(x) * TD - rf_annual) / (sample_std(x) * math.sqrt(TD)) if sample_std(x) else None)
+    boot_ret = block_bootstrap(r, lambda x: mean(x) * T)
+    boot_sr = block_bootstrap(r, lambda x: (mean(x) * T - rf_annual) / (sample_std(x) * math.sqrt(T)) if sample_std(x) else None)
     jb, jb_p = jarque_bera(r)
     lb, lb_p = ljung_box(r, 5)
     out["significance"] = {
@@ -266,7 +268,7 @@ def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, l
         "annual_return_ci95": [quantile(boot_ret, 0.025), quantile(boot_ret, 0.975)] if boot_ret else None,
         "sharpe_ci95": [quantile(boot_sr, 0.025), quantile(boot_sr, 0.975)] if boot_sr else None,
         "prob_sharpe_positive": probabilistic_sharpe(r, 0.0, rf_d),
-        "min_track_record_days": min_track_record(r, 0.0, 0.95, rf_d),
+        "min_track_record_days": (lambda m: m * TD / T if m is not None else None)(min_track_record(r, 0.0, 0.95, rf_d)),
         "jarque_bera": jb, "jarque_bera_p": jb_p,
         "ljung_box": lb, "ljung_box_p": lb_p,
     }
@@ -286,7 +288,7 @@ def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, l
             continue
         reg = ols([v - rf_d for v in rb], [v - rf_d for v in rm])
         active = [x - y for x, y in zip(rb, rm)]
-        te = sample_std(active) * math.sqrt(TD)
+        te = sample_std(active) * math.sqrt(T)
         b_total = pairs[-1][1] / pairs[0][1] - 1
         up = [(x, y) for x, y in zip(rb, rm) if y > 0]
         dn = [(x, y) for x, y in zip(rb, rm) if y < 0]
@@ -307,11 +309,11 @@ def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, l
             "name": name,
             "total": b_total,
             "excess_total": total - b_total,
-            "beta": reg.get("beta"), "alpha_annual": reg["alpha"] * TD if reg else None,
+            "beta": reg.get("beta"), "alpha_annual": reg["alpha"] * T if reg else None,
             "alpha_t": reg.get("t_alpha"), "alpha_p": reg.get("p_alpha"), "beta_t": reg.get("t_beta"),
             "r2": reg.get("r2"), "correlation": math.copysign(math.sqrt(reg["r2"]), reg["beta"]) if reg else None,
             "tracking_error": te,
-            "information_ratio": (mean(active) * TD) / te if te else None,
+            "information_ratio": (mean(active) * T) / te if te else None,
             "active_t": ta, "active_p": pa,
             "up_capture": (mean(x for x, _ in up) / mean(y for _, y in up)) if up else None,
             "down_capture": (mean(x for x, _ in dn) / mean(y for _, y in dn)) if dn else None,
@@ -342,7 +344,7 @@ def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, l
         "beat_bench_rate": (sum(w["bot"] > w["bench"] for w in beat) / len(beat)) if beat else None,
         "avg_return": mean(w["bot"] for w in windows) if windows else None,
         "avg_excess": mean(w["bot"] - w["bench"] for w in beat) if beat else None,
-        "avg_days_between": mean((date.fromisoformat(w["to"]) - date.fromisoformat(w["from"])).days for w in windows) if windows else None,
+        "avg_days_between": mean(_days_between(w["from"], w["to"]) for w in windows) if windows else None,
         "windows": windows[-30:],
     }
 
@@ -366,6 +368,13 @@ def analyse(series: list[tuple[date, float]], benchmarks: dict[str, tuple[str, l
     out["rolling20"] = roll
     out["verdict"] = verdict(out)
     return out
+
+
+def _days_between(a: str, b: str) -> float:
+    """Days between two ISO dates or timestamps (fractions for timestamps)."""
+    if "T" in a or "T" in b:
+        return (datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds() / 86400
+    return (date.fromisoformat(b) - date.fromisoformat(a)).days
 
 
 def _at(series, d):

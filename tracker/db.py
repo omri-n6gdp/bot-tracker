@@ -137,6 +137,17 @@ class StockCache(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class Prediction(Base):
+    """A player's guess at the pie's return for one week (the prediction game)."""
+    __tablename__ = "predictions"
+    __table_args__ = (UniqueConstraint("week", "player"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week: Mapped[date] = mapped_column(Date, index=True)      # the Monday
+    player: Mapped[str] = mapped_column(String(40))
+    guess: Mapped[float] = mapped_column(Float)               # a fraction: 0.015 = +1.5%
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Meta(Base):
     """Key/value store: pie name, poll health, last error per source."""
     __tablename__ = "meta"

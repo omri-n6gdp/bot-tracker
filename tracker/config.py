@@ -83,6 +83,7 @@ class Settings:
     display_name: str | None = None  # what friends see; defaults to the pie's name
     bot_start_date: str | None = None  # history starts here; defaults to the pie's creation date
     deposits_path: Path | None = None  # DEPOSITS_CSV; defaults to deposits.csv next to contributions.csv
+    players: tuple = ()  # PLAYERS: who can play the weekly prediction game
 
     @property
     def benchmark_ticker(self) -> str:
@@ -118,6 +119,7 @@ class Settings:
             display_name=e("PIE_DISPLAY_NAME") or None,
             bot_start_date=e("BOT_START_DATE") or None,
             deposits_path=ROOT / e("DEPOSITS_CSV") if e("DEPOSITS_CSV") else None,
+            players=tuple(n.strip() for n in (e("PLAYERS") or "").split(",") if n.strip()),
         )
 
 

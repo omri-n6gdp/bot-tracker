@@ -49,6 +49,16 @@ the app: right-click it, choose Open, then Open again.
 
 The eye button hides every £ amount, for showing the page to someone without showing the sums.
 
+Also on the Overview:
+
+- **Today's recap**: the day in a few lines (since the open against the S&P, best and worst stock, any move, the game). Saved at the 21:30 close and sent to Telegram when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set (use a group's chat id so friends get it).
+- **Guess the week**: friends guess the pie's Monday-to-Friday return. Guesses close at Monday's New York open and stay hidden until then; closest wins; there's a leaderboard. Players are listed in `.env` as `PLAYERS=Name,Name,...` (kept out of the code). This is the only thing visitors can write, into the tracker's own database.
+- **Where it could go**: a Monte Carlo range for the next month, three months or year, from how today's stocks have moved over the past year, with no trend assumed.
+
+On the Quant page, each of the bot's moves shows **did it help?** (the new mix against keeping the old one, since the move) and **headlines from around the move**.
+
+Until the pie has 5 daily closes, the statistics, return and charts are worked out from its readings every minute (⚠️ marks numbers estimated from too little data; hover for why).
+
 ## Deposits (net put in)
 
 `deposits.csv` lists money you paid into the bot from outside, one row per deposit

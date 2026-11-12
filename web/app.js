@@ -74,6 +74,9 @@ const data = {
   news: () => load("news", "/api/news"),
   corr: () => load("corr", "/api/correlations"),
   rebalances: () => load("rebalances", "/api/rebalances").then((x) => x.rebalances || []),
+  game: () => get("/api/game"),          // never cached: guesses change it
+  recap: () => load("recap", "/api/recap"),
+  mc: () => load("mc", "/api/montecarlo"),
 };
 const benchKey = (s) => Object.keys(s?.benchmarks || {})[0];
 const shortBench = (n) => ({ "S&P 500": "S&P", "FTSE All-World": "World" }[n] || n || "market");
@@ -248,7 +251,7 @@ async function refresh() {
   try {
     await loadSummary();
     const v = state.view, all = (ps) => Promise.all(ps.map((p) => p.catch(console.error)));
-    if (v === "overview") await all([loadHero(), loadChart(), loadMap(), loadNews(), loadConsensus()]);
+    if (v === "overview") await all([loadHero(), loadChart(), loadMap(), loadNews(), loadConsensus(), loadGame(), loadRecap(), loadMC()]);
     if (v === "holdings") await all([loadHoldings()]);
     if (v === "quant") await all([loadQuant(), loadVol()]);
     if (v === "stock" && state.stock) await loadStock(state.stock);
@@ -300,22 +303,26 @@ function heroValue(v, ret) {
 }
 function heroNow() {
   const s = state.summary; if (!s?.ready) return;
-  $("#hero-label").textContent = state.private ? `Return since ${dShort(s.inception)}` : "Value now";
-  heroValue(s.value, s.returns?.ALL);
-  $("#hero-sub").innerHTML = `<span class="delta ${cls(s.day_change_pct)}">${arrow(s.day_change_pct)} ${pct2(s.day_change_pct)} today</span>${G(gbpS(s.day_change))}<span>updated ${timeF.format(new Date(s.as_of))}</span>`;
+  $("#hero-label").textContent = state.private ? "Return on money in" : "Value now";
+  heroValue(s.value, s.return_on_deposits);
+  // today's move from the open (09:30 New York); before the open, from the first reading today
+  const o = s.since_open, d = o ? o.pct : s.day_change_pct, g = o ? o.gbp : s.day_change;
+  const lab = o ? (o.at_open ? "since today's open" : `since ${timeF.format(new Date(o.from))}`) : "today";
+  $("#hero-sub").innerHTML = `<span class="delta ${cls(d)}">${arrow(d)} ${pct2(d)} ${lab}</span>${G(gbpS(g))}<span>updated ${timeF.format(new Date(s.as_of))}</span>`;
 }
 function renderStats(p) {   // p: a past daily point while scrubbing the chart, or null for now
   const s = state.summary, a = state.analysis || {}, bk = benchKey(s), bs = s.benchmarks?.[bk];
-  const ret = p ? p.pie : s.returns?.ALL, bench = p ? p.bench?.[bk] : bs?.since_start;
+  // return = value against net deposits; the market on the same deposits
+  const ret = p ? (p.deposits ? p.value / p.deposits - 1 : p.pie) : s.return_on_deposits;
+  const bench = p ? (p.deposits && p.bench_value?.[bk] != null ? p.bench_value[bk] / p.deposits - 1 : p.bench?.[bk]) : s.bench_on_deposits?.[bk]?.return ?? bs?.since_start;
   const profit = p ? (p.deposits != null ? p.value - p.deposits : null) : s.profit;
   const lead = bad(ret) || bad(bench) ? null : ret - bench;
   const items = [
-    state.private ? ["Return on money in", pct(s.return_on_deposits), cls(s.return_on_deposits), "profit against what was paid in"]
-                  : ["Profit", G(gbpS(profit)), cls(profit), p ? "at that date" : `${pct(s.return_on_deposits)} on ${gbp0(s.net_deposits)} paid in`],
-    ["Return", pct(ret), cls(ret), p ? "to that date" : `since ${dShort(s.inception)}, deposits excluded`],
-    [`Against the ${esc(bs?.name || "market")}`, pts(lead), cls(lead), `${esc(shortBench(bs?.name))} ${pct(bench)} over the same days`],
-    ...(a.ready ? [["Sharpe ratio", n2(a.ratios.sharpe), "", `${p0(a.significance.prob_sharpe_positive)} likely to be above zero`],
-                   ["Worst fall", pct(a.risk.max_drawdown), "down", `now ${pct(a.risk.current_drawdown)} from the high`]] : []),
+    ...(state.private ? [] : [["Profit", G(gbpS(profit)), cls(profit), p ? "at that date" : `value now minus ${gbp0(s.net_deposits)} paid in`]]),
+    ["Return", pct(ret), cls(ret), p ? "to that date" : `value now against ${G(gbp0(s.net_deposits))} paid in`],
+    [`Against the ${esc(bs?.name || "market")}`, pts(lead), cls(lead), `${esc(shortBench(bs?.name))} ${pct(bench)} on the same deposits`],
+    ...(a.ready ? [[`Sharpe ratio${warn(thinWhy(a))}`, n2(a.ratios.sharpe), "", a.readings ? "early: from today's readings" : `${p0(a.significance.prob_sharpe_positive)} likely to be above zero`],
+                   ["Worst fall", pct(a.risk.max_drawdown), "down", a.readings ? "early: from today's readings" : `now ${pct(a.risk.current_drawdown)} from the high`]] : []),
   ];
   $("#stats").innerHTML = items.map(([k, v, c, sub]) => `<div><dt>${k}</dt><dd class="${c}">${v}<small>${sub}</small></dd></div>`).join("");
 }
@@ -336,10 +343,10 @@ function onScrub(i, px) {
   lab.style.left = `${clamp(px, 34, host.clientWidth - 34)}px`;
   state.counted = true;
   if (S.intraday) {
-    const r = S.base ? p.value / S.base - 1 : null;
-    $("#hero-label").textContent = `Today at ${timeF.format(new Date(p.t))}`;
+    const r = S.early ? p.u / S.P[0].u - 1 : S.base ? p.value / S.base - 1 : null;
+    $("#hero-label").textContent = S.early ? `${dShort(p.t)} at ${timeF.format(new Date(p.t))}` : `Today at ${timeF.format(new Date(p.t))}`;
     heroValue(p.value, r);
-    $("#hero-sub").innerHTML = `<span class="delta ${cls(r)}">${arrow(r)} ${pct2(r)} since yesterday's close</span>`;
+    $("#hero-sub").innerHTML = `<span class="delta ${cls(r)}">${arrow(r)} ${pct2(r)} since ${S.early ? "the start" : S.baseLabel}</span>`;
   } else {
     $("#hero-label").textContent = dLong(p.t);
     heroValue(p.value, p.pie);
@@ -351,22 +358,26 @@ function onScrub(i, px) {
 async function loadChart(animate = !state.chartShown) {
   const [h, reb] = await Promise.all([data.history(state.range), data.rebalances()]);
   const P = h.points || [], bc = [COL.blue, COL.grey];
-  if (!state.bench.length && h.benchmarks?.length) state.bench = h.benchmarks.map((b, i) => ({ ...b, on: i === 0 }));
+  if (!state.bench.length && h.benchmarks?.length) state.bench = h.benchmarks.map((b, i) => ({ key: b.key, name: b.name, on: i === 0 }));
   const box = $("#toggles");
-  box.innerHTML = `<span><i style="background:${COL.amber}"></i>The bot</span>` + (h.intraday ? `<span><i style="background:${COL.faint}"></i>Yesterday's close</span>`
-    : state.bench.map((b, i) => `<button class="chip" data-bench="${esc(b.key)}" aria-pressed="${b.on}"><i style="background:${bc[i % 2]}"></i>${esc(b.name)}</button>`).join("") + `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`);
+  const chips = state.bench.filter((b) => !h.intraday || h.benchmarks?.some((x) => x.key === b.key))
+    .map((b) => `<button class="chip" data-bench="${esc(b.key)}" aria-pressed="${b.on}"><i style="background:${bc[state.bench.indexOf(b) % 2]}"></i>${esc(b.name)}</button>`).join("");
+  box.innerHTML = `<span><i style="background:${COL.amber}"></i>The bot</span>` + chips + (h.intraday ? `<span><i style="background:${COL.faint}"></i>${esc(h.baseline_label || "Yesterday's close")}</span>`
+    : `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`);
   $$("[data-bench]", box).forEach((el) => el.addEventListener("click", () => { const b = state.bench.find((x) => x.key === el.dataset.bench); b.on = !b.on; loadChart(false); }));
   let datasets, yFmt;
-  state.series = { P, intraday: !!h.intraday, base: h.baseline || P[0]?.value };
+  state.series = { P, intraday: !!h.intraday, early: !!h.early, base: h.baseline || P[0]?.value, baseLabel: (h.baseline_label || "Yesterday's close").toLowerCase() };
   const thin = P.length < 2, note = $("#chart-empty");
   note.hidden = !thin;
   note.textContent = h.intraday ? "Today's line appears once the tracker has a few minutes of prices." : "The chart starts after the first full day with money in the pie.";
   if (thin) { state.charts["main-chart"]?.destroy(); delete state.charts["main-chart"]; return; }
   if (h.intraday) {
-    const base = state.series.base, d = P.map((p) => ({ x: new Date(p.t).getTime(), y: base ? p.value / base - 1 : 0 }));
+    const base = state.series.base, d = P.map((p) => ({ x: new Date(p.t).getTime(), y: h.early ? p.u / P[0].u - 1 : base ? p.value / base - 1 : 0 }));
     yFmt = pct2;
-    datasets = [{ label: "Today", data: d, borderColor: COL.amber, backgroundColor: areaFill(COL.amber), fill: "origin", borderWidth: 2.2, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, glow: true, tag: pct2 }];
-    if (d.length) datasets.push({ label: "Yesterday's close", data: [{ x: d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
+    datasets = [{ label: h.early ? "The bot" : "Today", data: d, borderColor: COL.amber, backgroundColor: areaFill(COL.amber), fill: "origin", borderWidth: 2.2, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, glow: true, tag: pct2 }];
+    // the market over the same minutes, from the same starting point
+    state.bench.forEach((b, i) => { const hb = b.on && h.benchmarks?.find((x) => x.key === b.key); if (hb?.points?.length) datasets.push({ label: b.name, data: hb.points.map((p) => ({ x: new Date(p.t).getTime(), y: p.pct })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, order: 2, tag: pct2 }); });
+    if (d.length) datasets.push({ label: h.baseline_label || "Yesterday's close", data: [{ x: d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
   } else {
     const main = P.map((p) => ({ x: tms(p.t), y: p.pie }));
     yFmt = pct;
@@ -405,10 +416,21 @@ function renderMap() {
   const host = $("#treemap"), hs = held(), W = host.clientWidth, H = host.clientHeight;
   if (!W || !H) return;
   const mode = state.mapMode, val = (h) => (mode === "day" ? h.day_pct : mode === "total" ? h.pl_pct : h.analyst?.upside), span = { day: 0.05, total: 0.35, analyst: 1 }[mode];
-  const rects = squarify(hs.map((h) => ({ item: h, v: Math.max(h.weight, 0.004) })).sort((a, b) => b.v - a.v), W, H);
+  // uninvested cash (what couldn't be split between the holdings) gets a tile of its own
+  const cash = state.holdingsData?.cash || 0, hv = state.holdingsData?.holdings_value || hs.reduce((a, h) => a + (h.value || 0), 0), share = hv / (hv + cash || 1);
+  const items = hs.map((h) => ({ item: h, v: Math.max(h.weight * share, 0.004) }));
+  if (cash > 0.005) items.push({ item: { ticker: "_cash", symbol: "Cash", cash: true, weight: cash / (hv + cash) }, v: Math.max(cash / (hv + cash), 0.004) });
+  const rects = squarify(items.sort((a, b) => b.v - a.v), W, H);
   const seen = new Set();
   rects.forEach((r) => {
     const h = r.item; seen.add(h.ticker);
+    if (h.cash) {
+      let el = host.querySelector('[data-tk="_cash"]');
+      if (!el) { el = document.createElement("div"); el.className = "tile cash"; el.dataset.tk = "_cash"; el.title = "Money in the pie that couldn't be split between the holdings"; host.append(el); }
+      Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px`, background: "rgba(237,235,230,.05)", fontSize: `${clamp(Math.sqrt(r.w * r.h) / 6.5, 11, 24)}px` });
+      el.innerHTML = `<b>Cash</b>${r.w > 46 && r.h > 40 ? `<span class="muted" style="font-size:.78em">${G(gbp(cash))}</span>` : ""}${r.w > 104 && r.h > 54 ? `<small>${pp(h.weight)}</small>` : ""}`;
+      return;
+    }
     let el = host.querySelector(`[data-tk="${CSS.escape(h.ticker)}"]`);
     if (!el) { el = document.createElement("a"); el.className = "tile"; el.dataset.tk = h.ticker; el.href = stockHref(h.ticker); host.append(el); }
     const v = val(h), fs = clamp(Math.sqrt(r.w * r.h) / 6.5, 11, 24);
@@ -489,8 +511,9 @@ function holdingsTable(all) {
   const tot = rows.reduce((a, h) => a + (h.value || 0), 0), totPl = rows.reduce((a, h) => a + (h.pl || 0), 0), totW = rows.reduce((a, h) => a + h.weight, 0);
   const dayW = rows.reduce((a, h) => a + (h.day_gbp || 0), 0), day = tot - dayW > 0 ? dayW / (tot - dayW) : null;
   return `<thead><tr>${head}</tr></thead><tbody>${rows.map((h) => `<tr data-go="${stockHref(h.ticker)}">${cols.map((c) => `<td class="${[c.l ? "l" : "", c.c || ""].join(" ")}">${c.f(h)}</td>`).join("")}</tr>`).join("")}</tbody>
-    <tfoot><tr><td class="l" colspan="4">${state.sector ? esc(state.sector) : "Whole pie"}</td><td>${pp(totW)}</td><td></td><td>${G(gbp(tot))}</td><td class="${cls(day)}">${pct2(day)}</td><td class="${cls(totPl)}">${G(gbpS(totPl))}</td><td colspan="3"></td></tr></tfoot>`;
+    <tfoot>${!state.sector && cashNow() > 0.005 ? `<tr class="cash-row"><td class="l" colspan="4">Cash <span class="muted">couldn't be split between the holdings</span></td><td></td><td></td><td>${G(gbp(cashNow()))}</td><td colspan="5"></td></tr>` : ""}<tr><td class="l" colspan="4">${state.sector ? esc(state.sector) : "Whole pie"}</td><td>${pp(totW)}</td><td></td><td>${G(gbp(tot + (state.sector ? 0 : cashNow())))}</td><td class="${cls(day)}">${pct2(day)}</td><td class="${cls(totPl)}">${G(gbpS(totPl))}</td><td colspan="3"></td></tr></tfoot>`;
 }
+const cashNow = () => state.holdingsData?.cash || 0;
 const SECTOR_COLOURS = ["#FFB020", "#5CC8FF", "#3DDC97", "#FF8A65", "#B79CFF", "#EDEBE6", "#F2D06B", "#7FD1B9", "#9A978F", "#FF6B9A"];
 function renderSectors(secs) {
   const host = $("#sectors"), r = 70, C_ = 2 * Math.PI * r; let acc = 0;
@@ -545,24 +568,160 @@ async function loadHoldings() {
 }
 $("#hold-table").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-go]"); if (tr && !e.target.closest("a, button")) location.hash = tr.dataset.go.slice(1); });
 
+/* ================= the weekly prediction game ================= */
+const LS = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+async function loadGame(st) {
+  st = st || await data.game();
+  const card = $("#game-card"); card.hidden = !st.players?.length; if (card.hidden) return;
+  const o = st.open, me = LS.get("game-player") || "", dl = new Date(o.deadline);
+  const when = `${dl.toLocaleDateString("en-GB", { weekday: "short", timeZone: "Europe/London" })} ${timeF.format(dl)}`;
+  $("#game-meta").textContent = `week of ${dShort(o.week)}, closes ${when}`;
+  const chips = st.players.map((p) => `<span class="gchip ${o.guessed.includes(p) ? "in" : ""}" title="${o.guessed.includes(p) ? "has guessed" : "hasn't guessed yet"}">${o.guessed.includes(p) ? "✓ " : ""}${esc(p)}</span>`).join("");
+  const form = `<form class="gform" id="gform">
+      <select id="gplayer" aria-label="Who are you?"><option value="">Who are you?</option>${st.players.map((p) => `<option ${p === me ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <label class="gnum"><input id="gguess" type="number" step="0.1" min="-50" max="50" inputmode="decimal" placeholder="+1.5" aria-label="Your guess for the week's return, in percent" required><span>%</span></label>
+      <button type="submit" class="chip gbtn">Save guess</button></form>
+    <p class="sub gnote" id="gnote">The pie's return from ${dShort(o.week)} to ${dShort(o.friday)}. Guesses stay hidden until ${when}; you can change yours until then.</p>
+    <div class="gchips">${chips}</div>`;
+  const c = st.current;
+  const live = c ? `<h3 class="gh">This week so far <b class="${cls(c.return)}">${pct2(c.return)}</b></h3><table class="gtbl"><tbody>${c.guesses.map((g) => `<tr class="${g.winner ? "lead" : ""}"><td>${g.winner ? "🏆 " : ""}${esc(g.player)}</td><td class="${cls(g.guess)}">${pct2(g.guess)}</td><td class="muted">off by ${g.error == null ? "—" : `${(g.error * 100).toFixed(2)} pts`}</td></tr>`).join("") || `<tr><td class="muted">Nobody guessed this week.</td></tr>`}</tbody></table>` : "";
+  const lb = st.leaderboard.filter((b) => b.played);
+  const board = lb.length ? `<h3 class="gh">Leaderboard</h3><table class="gtbl"><thead><tr><th>Player</th><th>Wins</th><th>Average miss</th><th>Weeks</th></tr></thead><tbody>${lb.map((b, i) => `<tr><td>${i === 0 ? "👑 " : ""}${esc(b.player)}</td><td>${b.wins}</td><td>${b.avg_error == null ? "—" : `${(b.avg_error * 100).toFixed(2)} pts`}</td><td>${b.played}</td></tr>`).join("")}</tbody></table>` : `<p class="sub">The leaderboard starts after the first week is scored.</p>`;
+  const last = st.past?.[0], lastLine = last ? `<p class="sub">Last week (${dShort(last.week)}): the pie did <b class="${cls(last.return)}">${pct2(last.return)}</b>, won by ${last.guesses.filter((g) => g.winner).map((g) => `${esc(g.player)} (${pct2(g.guess)})`).join(" and ") || "nobody"}.</p>` : "";
+  $("#game").innerHTML = form + live + lastLine + board;
+  $("#gform").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const player = $("#gplayer").value, guess = parseFloat($("#gguess").value), note = $("#gnote");
+    if (!player) { note.textContent = "Pick your name first."; return; }
+    if (!Number.isFinite(guess)) { note.textContent = "Type a percentage, like 1.5 or -2."; return; }
+    LS.set("game-player", player);
+    try {
+      const r = await fetch("/api/game/guess", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ player, guess }) });
+      const body = await r.json();
+      if (!r.ok) { $("#gnote").textContent = body.detail || "That didn't save. Try again."; return; }
+      await loadGame(body);
+      $("#gnote").innerHTML = `<b>Saved:</b> ${esc(player)}, ${pct2(guess / 100)} for the week of ${dShort(body.open.week)}.`;
+    } catch { $("#gnote").textContent = "Couldn't reach the tracker. Try again in a moment."; }
+  });
+}
+
+/* ================= the bot's moves: did they help, and the news around them ================= */
+function moveVerdict(r) {
+  const j = r.judged; if (!j) return "";
+  const until = j.open ? "so far" : `until the next move (${dShort(j.to)})`;
+  const why = `From the move (${dShort(j.from)} ${timeF.format(new Date(j.from))}) ${j.open ? "to now" : `to the next move on ${dShort(j.to)}`}: the return of the new target mix against what the old mix would have made, using each stock's price in pounds (${j.prices === "minute" ? "minute by minute" : "daily closes"}). Weights are held as the bot set them.${j.missing?.length ? ` No prices for ${j.missing.length} stock(s).` : ""}`;
+  return `<div class="verdict" title="${esc(why)}"><span>Did it help? <span class="muted">${until}</span></span>
+    <b class="${cls(j.value_added)}">${j.value_added >= 0 ? "Yes" : "Not yet"}, ${(j.value_added * 100 >= 0 ? "+" : "") + (j.value_added * 100).toFixed(2)} pts</b>
+    <small>new mix <b class="${cls(j.new_mix)}">${pct2(j.new_mix)}</b> against <b class="${cls(j.old_mix)}">${pct2(j.old_mix)}</b> if it had changed nothing</small></div>`;
+}
+function moveNews(r) {
+  const n = r.news || []; if (!n.length) return "";
+  const kind = (k) => (k === "added" ? "bought" : k === "removed" ? "sold" : "");
+  return `<h3 class="gh">In the news around the move</h3><ul class="mnews">${n.slice(0, 8).map((x) => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener"><span class="tk">${esc(x.symbol)}</span>${kind(x.kind) ? `<span class="muted"> ${kind(x.kind)}</span>` : ""} ${esc(x.title)}</a><small>${esc(x.publisher || "")}${x.published ? ` · ${dShort(x.published)}` : ""}</small></li>`).join("")}</ul>`;
+}
+
+/* ================= today's recap ================= */
+async function loadRecap() {
+  const r = await data.recap(), card = $("#recap-card");
+  card.hidden = !r?.date; if (card.hidden) return;
+  const today = r.date === new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+  $("#recap-title").textContent = r.final ? (today ? "Today's recap" : `Recap, ${dShort(r.date)}`) : "Today so far";
+  $("#recap-meta").textContent = r.final ? "as of the 21:30 close" : `updated ${timeF.format(new Date(r.built))}`;
+  const o = r.since_open, b = Object.values(r.bench_since_open || {})[0], lead = o && b ? o.pct - b.change : null;
+  const rows = [];
+  if (o) rows.push(["Since the open", `<b class="${cls(o.pct)}">${pct2(o.pct)}</b> ${G(gbpS(o.gbp))}`, b ? `${esc(shortBench(b.name))} ${pct2(b.change)}, so <b class="${cls(lead)}">${pts(lead)}</b>` : ""]);
+  if (r.best) rows.push(["Best", `<span class="tk">${esc(r.best.symbol)}</span> <b class="${cls(r.best.pct)}">${pct2(r.best.pct)}</b>`, `${r.up} up, ${r.down} down`]);
+  if (r.worst) rows.push(["Worst", `<span class="tk">${esc(r.worst.symbol)}</span> <b class="${cls(r.worst.pct)}">${pct2(r.worst.pct)}</b>`, ""]);
+  (r.moves || []).forEach((m) => rows.push(["The bot moved", `${m.count} changes${m.added.length ? `, bought ${esc(m.added.join(", "))}` : ""}${m.removed.length ? `, sold ${esc(m.removed.join(", "))}` : ""}`, m.judged ? `<b class="${cls(m.judged.value_added)}">${pts(m.judged.value_added)}</b> against the old mix` : ""]));
+  rows.push(["Overall", `<b class="${cls(r.return_on_deposits)}">${pct(r.return_on_deposits)}</b> on ${G(gbp0(r.net_deposits))} paid in`, G(gbpS(r.profit))]);
+  const g = r.game;
+  if (g?.just_scored) { const w = g.just_scored.guesses.filter((x) => x.winner); rows.push(["Guess the week", `the pie did <b class="${cls(g.just_scored.return)}">${pct2(g.just_scored.return)}</b>`, w.length ? `🏆 ${esc(w.map((x) => x.player).join(" and "))}` : "nobody guessed"]); }
+  else if (g) rows.push(["Guess the week", `${g.guessed} of ${g.players} guesses in`, `for the week of ${dShort(g.open_week)}`]);
+  $("#recap").innerHTML = `<table class="gtbl recap"><tbody>${rows.map(([k, v, x]) => `<tr><td class="muted">${k}</td><td>${v}</td><td class="muted ar">${x}</td></tr>`).join("")}</tbody></table>`;
+}
+
+/* ================= where it could go (Monte Carlo) ================= */
+state.mcH = 63;
+async function loadMC() {
+  const m = await data.mc(), card = $("#mc-card");
+  card.hidden = !m?.fan?.length; if (card.hidden) return;
+  const H = state.mcH, F = [[0, m.value, m.value, m.value, m.value, m.value], ...m.fan.slice(0, H)], v0 = m.value;
+  const at = (k) => F.map((r) => ({ x: r[0], y: r[k] / v0 - 1 }));
+  $("#mc-sub").textContent = `${m.paths.toLocaleString("en-GB")} simulated paths built from how the ${m.holdings} stocks it holds now have moved day to day over the past year (${m.days_used} trading days), at today's weights, with the cash held flat. No trend up or down is assumed, so this shows how wide the range is, not a forecast.`;
+  const band = (lo, hi, a) => [{ data: at(lo), borderWidth: 0, pointRadius: 0, fill: false }, { data: at(hi), borderWidth: 0, pointRadius: 0, fill: "-1", backgroundColor: `rgba(255,176,32,${a})` }];
+  chart("mc-chart", { type: "line", data: { datasets: [...band(1, 5, 0.12), ...band(2, 4, 0.22),
+      { label: "Middle", data: at(3), borderColor: COL.amber, borderWidth: 2, pointRadius: 0, fill: false }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: "index", intersect: false },
+      plugins: { legend: { display: false }, tooltip: { filter: (it) => it.datasetIndex === 4, callbacks: { title: (it) => `${it[0].raw.x} trading days ahead`, label: (it) => { const r = F[it.dataIndex]; return [` Middle ${pct(r[3] / v0 - 1)}`, ` Half end between ${pct(r[2] / v0 - 1)} and ${pct(r[4] / v0 - 1)}`, ` 9 in 10 between ${pct(r[1] / v0 - 1)} and ${pct(r[5] / v0 - 1)}`]; } } } },
+      scales: { x: { type: "linear", min: 0, max: H, grid: { display: false }, border: { display: false }, ticks: { stepSize: 21, callback: (d) => (d === 0 ? "now" : `${Math.round(d / 21)}M`) } },
+        y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (x) => pct(x), maxTicksLimit: 6 } } } } });
+  const end = F[F.length - 1], hz = m.horizons[String(H)] || {}, lab = { 21: "a month", 63: "three months", 252: "a year" }[H];
+  $("#mc-stats").innerHTML = [
+    ["Middle outcome", G(gbp(end[3])), "", `in ${lab}`],
+    ["1 in 20 worse than", G(gbp(end[1])), "down", pct(end[1] / v0 - 1)],
+    ["1 in 20 better than", G(gbp(end[5])), "up", pct(end[5] / v0 - 1)],
+    ["Chance of a loss", p0(hz.loss), "", `below today's ${G(gbp0(v0))}`],
+    ["Chance of −10% or worse", p0(hz.down10), "down", `chance of +10% or better: ${p0(hz.up10)}`],
+  ].map(([k, val, c, sub]) => `<div><dt>${k}</dt><dd class="${c}">${val}<small>${sub}</small></dd></div>`).join("");
+}
+$$("#mc-range button").forEach((b) => b.addEventListener("click", () => { state.mcH = +b.dataset.mc; $$("#mc-range button").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); loadMC(); }));
+
+/* ================= warnings for estimates from too little data ================= */
+const RELIABLE_DAYS = 63;  // about three months of trading days
+function thinWhy(a) {
+  if (!a?.ready) return null;
+  if (a.readings) return `Estimated from only ${a.readings.readings.toLocaleString("en-GB")} minute readings since ${timeF.format(new Date(a.readings.from))} on ${dShort(a.readings.from)}, scaled up to a year. That's far too little data for this to be reliable: it can swing wildly from one minute to the next. It settles down once there are a few months of daily closes.`;
+  if (a.n_days < RELIABLE_DAYS) return `Estimated from only ${a.n_days} trading days. Figures like this need about three months (${RELIABLE_DAYS} trading days) of daily data before they mean much, so treat it as a rough early read.`;
+  return null;
+}
+const warn = (why) => (why ? ` <span class="warn" tabindex="0" title="${esc(why)}" aria-label="Not enough data: ${esc(why)}">⚠️</span>` : "");
+const setTitle = (innerSel, text) => { const h = $(innerSel)?.closest("section")?.querySelector("h2"); if (h) h.textContent = text; };
+
 /* ================= quant ================= */
+// a short note in place of a chart that has nothing to draw yet
+function chartNote(id, text) {
+  const c = document.getElementById(id), box = c.parentElement;
+  let n = box.querySelector(".chart-note");
+  if (!text) { c.hidden = false; n?.remove(); return false; }
+  c.hidden = true;
+  if (!n) { n = document.createElement("p"); n.className = "empty chart-note"; box.append(n); }
+  n.textContent = text;
+  return true;
+}
 const Phi = (z) => { const t = 1 / (1 + 0.2316419 * Math.abs(z)), d = 0.3989423 * Math.exp(-z * z / 2), p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274)))); return z > 0 ? 1 - p : p; };
 async function loadQuant() {
   const [a, st, reb, h, corr] = await Promise.all([data.analysis(), data.stats(), data.rebalances(), data.history("ALL"), data.corr().catch(() => null)]);
-  const wait = $("#quant-wait");
-  wait.hidden = !!a.ready;
+  const wait = $("#quant-wait"), rd = a.readings, u = rd ? "minute" : "day";
+  wait.hidden = !!a.ready && !rd;
   $$("#view-quant [data-stats]").forEach((el) => (el.hidden = !a.ready));
   if (!a.ready) { wait.innerHTML = `<h2>Not enough history yet</h2><p class="sub">The statistics need at least a week of daily values. The volatility surface below works already.</p>`; return; }
-  const s = state.summary, bk = benchKey(s), v = a.vs?.[bk] || {}, bn = shortBench(v.name);
+  if (rd) wait.innerHTML = `<p class="sub"><b>Early figures.</b> Worked out from this pie's own value every minute since ${timeF.format(new Date(rd.from))} on ${dShort(rd.from)} (${rd.readings.toLocaleString("en-GB")} readings), scaled up to a year, so they'll swing a lot at first. The market comparisons use the S&P and FTSE minute by minute too. From the fifth daily close everything switches to daily closes.</p>`;
+  const s = state.summary, bk = benchKey(s), v = a.vs?.[bk] || {}, bn = shortBench(v.name), W_ = warn(thinWhy(a));
   const R = a.returns, K = a.risk, Q = a.ratios, S = a.significance, M = a.moves || {}, P = h.points || [];
   $("#quant-stats").innerHTML = [
-    ["Sharpe ratio", n2(Q.sharpe), "", `${p0(S.prob_sharpe_positive)} likely above zero`], ["Sortino ratio", n2(Q.sortino), "", "return per unit of downside"],
-    ["Volatility", pp(K.volatility), "", "a year, from daily moves"], ["Worst fall", pct(K.max_drawdown), "down", `${dShort(K.max_dd_peak)} to ${dShort(K.max_dd_trough)}`],
-    [`Beta to the ${esc(bn)}`, n2(v.beta), "", `correlation ${n2(v.correlation)}`], ["Alpha", pct(v.alpha_annual), cls(v.alpha_annual), v.alpha_p < 0.05 ? "a year, statistically significant" : `a year, not yet significant (p ${n2(v.alpha_p)})`],
+    ["Sharpe ratio" + W_, n2(Q.sharpe), "", `${p0(S.prob_sharpe_positive)} likely above zero`], ["Sortino ratio" + W_, n2(Q.sortino), "", "return per unit of downside"],
+    ["Volatility" + W_, pp(K.volatility), "", `a year, from ${u}-by-${u} moves`], ["Worst fall", pct(K.max_drawdown), "down", !K.max_dd_peak ? "no fall yet" : rd ? `${timeF.format(new Date(K.max_dd_peak))} to ${timeF.format(new Date(K.max_dd_trough))}` : `${dShort(K.max_dd_peak)} to ${dShort(K.max_dd_trough)}`],
+    [`Beta to the ${esc(bn)}${W_}`, n2(v.beta), "", `correlation ${n2(v.correlation)}`], ["Alpha" + W_, pct(v.alpha_annual), cls(v.alpha_annual), v.alpha_p < 0.05 ? "a year, statistically significant" : `a year, not yet significant (p ${n2(v.alpha_p)})`],
   ].map(([k, val, c, sub]) => `<div><dt>${k}</dt><dd class="${c}">${val}<small>${sub}</small></dd></div>`).join("");
 
-  // every trading day, as a calendar
-  const days = P.slice(1).map((p, i) => ({ t: p.t, r: (1 + p.pie) / (1 + P[i].pie) - 1 }));
+  // every trading day, as a calendar (early days: every 15 minutes)
+  setTitle("#calendar", rd ? "Every 15 minutes" : "Every trading day");
+  setTitle("#roll-meta", rd ? "Rolling 20-minute return" : "Rolling 20-day return");
+  setTitle("#hist-meta", rd ? "Minute returns" : "Daily returns");
+  if (rd && a.blocks?.length) {
+    const B = a.blocks, span = Math.max(...B.map((b) => Math.abs(b.r)), 0.0005) * 0.75, ups = B.filter((b) => b.r > 0).length;
+    const byDay = {}; B.forEach((b) => (byDay[b.t.slice(0, 10)] ||= []).push(b));
+    const base = `${ups} up, ${B.length - ups} down`;
+    $("#cal-meta").textContent = base;
+    $("#calendar").innerHTML = Object.entries(byDay).map(([d, bs]) => `<div class="blk-row"><span>${dShort(d)}</span><div class="blk">${bs.map((b) => `<i data-r="${b.r}" data-t="${esc(b.t)}" style="background:${heat(b.r, span)}"><small>${b.t.slice(11, 16)}</small></i>`).join("")}</div></div>`).join("");
+    const g = $("#calendar");
+    g.onmouseover = (e) => { const c = e.target.closest("[data-r]"); $("#cal-meta").innerHTML = c ? `${dShort(c.dataset.t)} ${c.dataset.t.slice(11, 16)}  <b class="${cls(+c.dataset.r)}">${pct2(+c.dataset.r)}</b>` : base; };
+    g.onmouseleave = () => { $("#cal-meta").textContent = base; };
+  }
+  const days = h.early ? [] : P.slice(1).map((p, i) => ({ t: p.t, r: (1 + p.pie) / (1 + P[i].pie) - 1 }));
+  const today = state.summary?.as_of ? new Date(state.summary.as_of).toLocaleDateString("en-CA", { timeZone: "Europe/London" }) : null;
+  if (!h.early && today && !days.some((d) => d.t === today) && !bad(state.summary?.day_change_pct) && new Date(today + "T12:00:00").getDay() % 6) days.push({ t: today, r: state.summary.day_change_pct });
+  if (!days.length && !(rd && a.blocks?.length)) { $("#cal-meta").textContent = ""; $("#calendar").innerHTML = `<p class="empty">Fills in once there's a day's change to show.</p>`; }
   if (days.length) {
     const start = parseDay(days[0].t); start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
     const byDay = Object.fromEntries(days.map((d) => [d.t, d.r])), cells = [], months = [];
@@ -581,6 +740,7 @@ async function loadQuant() {
   }
   chart("dd-chart", { type: "line", data: { datasets: [{ label: "Below the high", data: (st.drawdown || []).map((p) => ({ x: tms(p.t), y: p.dd })), borderColor: COL.down, backgroundColor: areaFill(COL.down, "55"), fill: "origin", borderWidth: 1.6, pointRadius: 0 }] }, options: timeOpts(pct) });
   const roll = a.rolling20 || [];
+  chartNote("roll-chart", roll.length ? null : rd ? "Needs 20 minutes of readings." : "Needs 20 trading days of daily closes.");
   $("#roll-meta").textContent = roll.length ? `ahead of the ${bn} ${p0(roll.filter((p) => p.bench != null && p.bot > p.bench).length / roll.length)} of the time` : "";
   chart("roll-chart", { type: "line", data: { datasets: [
     { label: "The bot", data: roll.map((p) => ({ x: tms(p.t), y: p.bot })), borderColor: COL.amber, borderWidth: 1.9, pointRadius: 0 },
@@ -616,30 +776,35 @@ async function loadQuant() {
   // month by month, bot against the benchmark
   const ends = {}; P.forEach((p) => { ends[p.t.slice(0, 7)] = p; });
   const mk = Object.keys(ends).sort(), mret = (get_) => mk.map((m, i) => { const now = get_(ends[m]), prev = i ? get_(ends[mk[i - 1]]) : 0; return bad(now) || bad(prev) ? null : (1 + now) / (1 + prev) - 1; });
-  const mb = mret((p) => p.pie), ms = mret((p) => p.bench?.[bk]);
+  let mb = mret((p) => p.pie), ms = mret((p) => p.bench?.[bk]);
+  if (h.early || mk.length <= 1) { const sm = state.summary; if (!mk.length && sm?.as_of) mk.push(new Date(sm.as_of).toISOString().slice(0, 7)); mb = [sm?.returns?.ALL ?? null]; ms = [sm?.benchmarks?.[bk]?.since_start ?? null]; }
+  if (h.early) mk.splice(0, mk.length, new Date(state.summary.as_of).toISOString().slice(0, 7));
+  $("#month-meta").innerHTML = mk.length ? `${MON[+mk.at(-1).slice(5) - 1]}: bot <b class="${cls(mb.at(-1))}">${pct2(mb.at(-1))}</b>, ${esc(bn)} <b class="${cls(ms.at(-1))}">${pct2(ms.at(-1))}</b>` : `bot against the ${esc(bn)}`;
   chart("month-chart", { type: "bar", data: { labels: mk.map((m) => `${MON[+m.slice(5) - 1]}`), datasets: [
     { label: "The bot", data: mb, backgroundColor: COL.amber, borderRadius: 4, maxBarThickness: 26 }, { label: v.name || "Benchmark", data: ms, backgroundColor: COL.blue, borderRadius: 4, maxBarThickness: 26 }] },
-    options: barOpts({ plugins: { legend: { display: false }, tooltip: { mode: "index", intersect: false, callbacks: { label: (it) => ` ${it.dataset.label}: ${pct(it.raw)}` } } },
-      scales: { x: { grid: { display: false }, border: { display: false } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (x) => pct(x), maxTicksLimit: 5 } } } }) });
+    options: barOpts({ plugins: { legend: { display: false }, tooltip: { mode: "index", intersect: false, callbacks: { label: (it) => ` ${it.dataset.label}: ${pct2(it.raw)}` } } },
+      scales: { x: { grid: { display: false }, border: { display: false } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (x) => (Math.max(...mb.concat(ms).map((z) => Math.abs(z || 0))) < 0.01 ? pct2(x) : pct(x)), maxTicksLimit: 5 } } } }) });
 
   // the bot's moves: click a bar to see what changed
   const W = M.windows || [], moves = [...reb].reverse();   // oldest first
+  chartNote("moves-chart", W.length ? null : rd ? "Each move's result shows here once the pie has daily closes." : "Each move's result shows here once the bot makes its next move.");
   const wBy = Object.fromEntries(W.map((w) => [w.from, w]));
   if (state.move == null || state.move >= moves.length) state.move = moves.length - 1;
   const showMove = (i) => {
     state.move = i;
     const r = moves[i]; if (!r) { $("#move-detail").innerHTML = `<p class="empty">The bot hasn't changed its targets yet.</p>`; return; }
-    const day = r.ts.slice(0, 10), w = wBy[day], ch = [...(r.changes || [])].sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
+    const day = r.ts.slice(0, 10), w = wBy[r.ts] || wBy[day], ch = [...(r.changes || [])].sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
     $("#move-title").textContent = `Move on ${dShort(day)}`;
     $("#move-meta").innerHTML = w ? `bot <b class="${cls(w.bot)}">${pct(w.bot)}</b>, ${esc(bn)} ${pct(w.bench)}` : !bad(r.return_since) ? `<b class="${cls(r.return_since)}">${pct(r.return_since)}</b> since` : "";
     $("#move-detail").innerHTML = `<div class="changes">${ch.slice(0, 9).map((x) => `<a class="change" data-tk="${esc(x.ticker)}" href="${stockHref(x.ticker)}"><span class="tk">${esc(x.symbol)}</span><span class="${x.kind === "added" ? "up" : x.kind === "removed" ? "down" : "muted"}">${x.kind === "added" ? "bought in" : x.kind === "removed" ? "sold out" : x.delta > 0 ? "raised" : "trimmed"}</span><span class="ar">${pp(x.before)} → ${pp(x.after)}</span></a>`).join("") || `<p class="empty">No target changes recorded.</p>`}</div>
+      ${moveVerdict(r)}${moveNews(r)}
       <div class="move-nav"><button type="button" data-step="-1" ${i <= 0 ? "disabled" : ""}>‹ Earlier</button><button type="button" data-step="1" ${i >= moves.length - 1 ? "disabled" : ""}>Later ›</button></div>`;
     $$("#move-detail [data-step]").forEach((b) => b.addEventListener("click", () => { showMove(state.move + +b.dataset.step); paint(); }));
   };
-  const wIdx = W.map((w) => moves.findIndex((r) => r.ts.slice(0, 10) === w.from));
+  const wIdx = W.map((w) => moves.findIndex((r) => r.ts === w.from || r.ts.slice(0, 10) === w.from));
   const dim = (col, k) => (wIdx[k] === state.move ? col : col + "59");
   const paint = () => { const c = state.charts["moves-chart"]; if (!c) return; c.data.datasets[0].backgroundColor = W.map((_, k) => dim(COL.amber, k)); c.data.datasets[1].backgroundColor = W.map((_, k) => dim(COL.blue, k)); c.update("none"); };
-  chart("moves-chart", { type: "bar", data: { labels: W.map((w) => dShort(w.from)), datasets: [
+  chart("moves-chart", { type: "bar", data: { labels: W.map((w) => (w.from.length > 10 ? `${dShort(w.from)} ${timeF.format(new Date(w.from))}` : dShort(w.from))), datasets: [
     { label: "The bot", data: W.map((w) => w.bot), backgroundColor: W.map((_, k) => dim(COL.amber, k)), borderRadius: 3, maxBarThickness: 16 },
     { label: v.name || "Benchmark", data: W.map((w) => w.bench), backgroundColor: W.map((_, k) => dim(COL.blue, k)), borderRadius: 3, maxBarThickness: 16 }] },
     options: barOpts({ interaction: { mode: "index", intersect: false }, onHover: (e, els) => { e.native.target.style.cursor = els.length ? "pointer" : ""; },
@@ -648,13 +813,13 @@ async function loadQuant() {
       scales: { x: { grid: { display: false }, border: { display: false }, ticks: { maxRotation: 0, autoSkip: true } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (x) => pct(x), maxTicksLimit: 5 } } } }) });
   showMove(state.move);
 
-  $("#risk-meta").textContent = `${a.n_days} trading days`;
-  $("#risk-kv").innerHTML = [["Total return", pct(R.total), cls(R.total)], ["A year at this pace", pct(R.cagr), cls(R.cagr)], ["Up days", p0(R.pct_up_days)], ["Average up day", pct2(R.avg_up_day), "up"],
-    ["Average down day", pct2(R.avg_down_day), "down"], ["Best day", `${pct2(R.best_day)}${st.best_day ? `, ${dShort(st.best_day.date)}` : ""}`, "up"], ["Worst day", `${pct2(R.worst_day)}${st.worst_day ? `, ${dShort(st.worst_day.date)}` : ""}`, "down"], ["Bad day, 1 in 20", pct2(-K.var95_daily), "down"],
-    ["Average of the worst 5%", pct2(-K.cvar95_daily), "down"], ["Longest time below a high", `${K.longest_underwater_days} days`], ["Skew", n2s(K.skew)], ["Excess kurtosis", n2s(K.excess_kurtosis)],
-    ["Calmar ratio", n2(Q.calmar)], ["Omega ratio", n2(Q.omega)], ["Tracking error", pp(v.tracking_error)], ["Information ratio", n2(v.information_ratio)],
-    [`Share of ${esc(bn)} gains caught`, p0(v.up_capture)], [`Share of ${esc(bn)} falls taken`, p0(v.down_capture)], ["Moves that made money", p0(M.win_rate)], [`Moves that beat the ${esc(bn)}`, p0(M.beat_bench_rate)],
-    ["Sharpe, 95% range", S.sharpe_ci95 ? `${n2(S.sharpe_ci95[0])} to ${n2(S.sharpe_ci95[1])}` : "—"], ["Days needed to be sure", Math.round(S.min_track_record_days).toLocaleString("en-GB")], ["Months ahead of it", `${v.months_beaten} of ${v.months}`], ["Trading days between moves", n2(M.avg_days_between)],
+  $("#risk-meta").textContent = rd ? `${a.n_days.toLocaleString("en-GB")} minute readings` : `${a.n_days} trading days`;
+  $("#risk-kv").innerHTML = [["Total return", pct(R.total), cls(R.total)], ["A year at this pace" + W_, pct(R.cagr), cls(R.cagr)], [`Up ${u}s`, p0(R.pct_up_days)], [`Average up ${u}`, pct2(R.avg_up_day), "up"],
+    [`Average down ${u}`, pct2(R.avg_down_day), "down"], [`Best ${u}`, `${pct2(R.best_day)}${!rd && st.best_day ? `, ${dShort(st.best_day.date)}` : ""}`, "up"], [`Worst ${u}`, `${pct2(R.worst_day)}${!rd && st.worst_day ? `, ${dShort(st.worst_day.date)}` : ""}`, "down"], [`Bad ${u}, 1 in 20${W_}`, pct2(-K.var95_daily), "down"],
+    ["Average of the worst 5%" + W_, pct2(-K.cvar95_daily), "down"], ["Longest time below a high", `${K.longest_underwater_days} ${u}s`], ["Skew" + W_, n2s(K.skew)], ["Excess kurtosis" + W_, n2s(K.excess_kurtosis)],
+    ["Calmar ratio" + W_, n2(Q.calmar)], ["Omega ratio" + W_, n2(Q.omega)], ["Tracking error" + W_, pp(v.tracking_error)], ["Information ratio" + W_, n2(v.information_ratio)],
+    [`Share of ${esc(bn)} gains caught${W_}`, p0(v.up_capture)], [`Share of ${esc(bn)} falls taken${W_}`, p0(v.down_capture)], ["Moves that made money", p0(M.win_rate)], ["Moves that beat the old mix", (() => { const j = reb.filter((r) => r.judged); return j.length ? `${j.filter((r) => r.judged.value_added > 0).length} of ${j.length}` : "—"; })()], [`Moves that beat the ${esc(bn)}`, p0(M.beat_bench_rate)],
+    ["Sharpe, 95% range" + W_, S.sharpe_ci95 ? `${n2(S.sharpe_ci95[0])} to ${n2(S.sharpe_ci95[1])}` : "—"], ["Days needed to be sure" + W_, Math.round(S.min_track_record_days).toLocaleString("en-GB")], ["Months ahead of it", `${v.months_beaten} of ${v.months}`], ["Trading days between moves", n2(M.avg_days_between)],
   ].map(([k, val, c]) => `<div><dt>${k}</dt><dd class="${c || ""}">${val}</dd></div>`).join("");
 }
 

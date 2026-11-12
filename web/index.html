@@ -8,11 +8,11 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="preload" href="/static/vendor/fonts/inter-tight-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/static/style.css?v=k5">
+<link rel="stylesheet" href="/static/style.css?v=k9">
 <script src="/static/vendor/chart.umd.js" defer></script>
 <script src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js" defer></script>
 <script src="/static/surface.js?v=k5" defer></script>
-<script src="/static/app.js?v=k5" defer></script>
+<script src="/static/app.js?v=k15" defer></script>
 </head>
 <body>
 <div class="aura" aria-hidden="true"><i></i><i></i></div>
@@ -80,6 +80,21 @@
     <section class="card s4">
       <div class="h"><h2>What analysts think</h2><span class="meta" id="consensus-meta"></span></div>
       <div class="fill" id="consensus"></div>
+    </section>
+    <section class="card s6" id="recap-card" hidden>
+      <div class="h"><h2 id="recap-title">Today's recap</h2><span class="meta" id="recap-meta"></span></div>
+      <div id="recap"></div>
+    </section>
+    <section class="card s6" id="game-card" hidden>
+      <div class="h"><h2>Guess the week</h2><span class="meta" id="game-meta"></span></div>
+      <div id="game"></div>
+    </section>
+    <section class="card s12" id="mc-card" hidden>
+      <div class="h"><h2>Where it could go</h2>
+        <div class="seg" id="mc-range" role="group" aria-label="How far ahead"><button data-mc="21" aria-pressed="false">1M</button><button data-mc="63" aria-pressed="true">3M</button><button data-mc="252" aria-pressed="false">1Y</button></div></div>
+      <p class="sub mc-sub" id="mc-sub"></p>
+      <div class="canvas grow mc-canvas"><canvas id="mc-chart" role="img" aria-label="Range of possible values for the pie"></canvas></div>
+      <dl class="stats strip" id="mc-stats"></dl>
     </section>
   </div>
 </section>
@@ -149,7 +164,7 @@
       <div class="canvas grow"><canvas id="hist-chart" role="img" aria-label="Histogram of daily returns against a normal curve"></canvas></div>
     </section>
     <section class="card s7" data-stats>
-      <div class="h"><h2>By month</h2><span class="meta">bot against the S&amp;P 500</span></div>
+      <div class="h"><h2>By month</h2><span class="meta" id="month-meta">bot against the S&amp;P 500</span></div>
       <div class="canvas grow"><canvas id="month-chart" role="img" aria-label="Monthly returns"></canvas></div>
     </section>
     <section class="card s8" data-stats>
