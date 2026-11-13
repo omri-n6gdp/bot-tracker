@@ -3,6 +3,7 @@ import math
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from zoneinfo import ZoneInfo
 
 from tracker import market, service, yahoo_closes
 from tracker.config import Settings
@@ -80,8 +81,8 @@ def test_yahoo_closes_give_yesterdays_price(tmp_path, monkeypatch):
         s.commit()
         yahoo_closes.build(s, [("AAA_US_EQ", 1.0, 79.2)], today=days[-1])
         s.commit()
-        h = service.holdings(s, Settings())["holdings"][0]
-    assert h["day_pct"] == pytest.approx(99 / 110 - 1)  # today's price against yesterday's close, in GBP
+        prev = service._prev_prices(s, ZoneInfo("Europe/London"), days[-1])["AAA_US_EQ"]
+    assert 79.2 / prev - 1 == pytest.approx(99 / 110 - 1)  # today's price against yesterday's close, in GBP
 
 
 def test_early_return_is_measured_from_the_first_reading(tmp_path):
@@ -161,8 +162,8 @@ def test_yesterdays_bar_is_not_scaled_to_todays_price(tmp_path, monkeypatch):
         s.commit()
         yahoo_closes.build(s, [("AAA_US_EQ", 1.0, 79.2)], today=date(2026, 11, 12))
         s.commit()
-        h = service.holdings(s, Settings())["holdings"][0]
-    assert h["day_pct"] == pytest.approx(79.2 / 88 - 1)   # against yesterday's $110 = £88
+        prev = service._prev_prices(s, ZoneInfo("Europe/London"), date(2026, 11, 12))["AAA_US_EQ"]
+    assert prev == pytest.approx(88)   # yesterday's $110 = £88, not scaled to today's price
 
 
 def test_market_line_stays_flat_until_its_first_price(tmp_path, monkeypatch):
@@ -332,3 +333,19 @@ def test_gaps_hold_flat():
            {"t": "2026-11-12T21:00:00+00:00", "u": 1.02}]
     out = service.hold_flat(pts)
     assert len(out) == 4 and out[2] == {"t": "2026-11-12T20:59:59+00:00", "u": 1.01, "held": 1}
+
+
+
+def test_1d_runs_from_the_most_recent_open(tmp_path):
+    # Thursday 14:30-14:39, then readings after midnight on Friday (before Friday's open)
+    S = _readings(tmp_path, [900.0 + i for i in range(10)], start=datetime(2026, 11, 12, 14, 30))
+    with S() as s:
+        for k in range(3):
+            s.add(PieSnapshot(ts=datetime(2026, 11, 13, 0, 10 + k), value=912.0, holdings_value=912.0, cash=20.0))
+        s.commit()
+        h = service.history(s, Settings(stale_after_s=10**9), "1D")
+        o = service.summary(s, Settings(stale_after_s=10**9))["since_open"]
+    assert h["points"][0]["t"].startswith("2026-11-12T14:30") and h["baseline_label"] == "Thu's open"
+    assert h["session"]["open"] == "2026-11-12T14:30:00+00:00"
+    assert o["at_open"] and o["from"].startswith("2026-11-12T14:30") and o["pct"] == pytest.approx(932 / 920 - 1)
+    assert service.last_ny_open(datetime(2026, 11, 15, 12, tzinfo=timezone.utc)).isoformat() == "2026-11-13T14:30:00+00:00"  # Sunday: Friday's

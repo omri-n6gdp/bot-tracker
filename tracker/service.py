@@ -255,10 +255,11 @@ def history(s: Session, cfg: Settings, rng: str = "3M") -> dict:
             return {"range": rng, "intraday": True, "points": []}
         # u: unit price, so money paid in during the day isn't drawn as a gain
         return {"range": rng, "intraday": True, "baseline": rows[0].value,
-                "baseline_label": "Today's open" if at_open else "First reading today",
+                "baseline_label": ("Today's open" if rows[0].date.astimezone(tz).date() == _local_date(snap.ts, tz)
+                                   else f"{rows[0].date.astimezone(tz).strftime('%a')}'s open") if at_open else "First reading today",
                 "benchmarks": _bench_since(s, cfg, rows[0].date),
-                # the whole New York session, so the chart fills in across the day like it did live
-                "session": _session_bounds(rows[0].date.astimezone(tz).date()),
+                # the session these readings start from (the chart's left edge is its open)
+                "session": _session_bounds(rows[0].date.astimezone(NY).date()) if at_open else None,
                 "points": hold_flat([{"t": r.date.isoformat(), "value": r.value, "u": r.unit_price} for r in rows])}
     if len(_daily(s)) < DAILY_STATS_FROM:
         # early days: every reading since the pie first held stocks, against the market over
@@ -390,11 +391,7 @@ def _open_prices(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | No
     """Each holding's price per share (GBP) at today's New York open: from the first reading at
     or after it; a stock bought later in the day, from the first reading that holds it. None
     before the open."""
-    day = _local_date(snap.ts, tz)
-    ny_open = datetime.combine(day, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY) \
-        .astimezone(timezone.utc).replace(tzinfo=None)
-    if snap.ts < ny_open:
-        return None
+    ny_open = last_ny_open(snap.ts).replace(tzinfo=None)   # the most recent open (yesterday's before today's)
     ids = list(s.scalars(select(PieSnapshot.id).where(PieSnapshot.ts >= ny_open).order_by(PieSnapshot.ts)))
     out: dict[str, float] = {}
     wanted = {h.ticker for h in snap.holdings if h.quantity and h.value}
@@ -456,8 +453,9 @@ def holdings(s: Session, cfg: Settings | None = None) -> dict:
     # "today" for each stock: from today's open once New York has opened (stocks bought later
     # in the day: from the first reading after they were bought); before the open, from
     # yesterday's close
-    open_px = _open_prices(s, snap, tz, cfg)
-    prev_px = open_px if open_px is not None else _prev_prices(s, tz, snap_day)
+    open_px = _open_prices(s, snap, tz, cfg) or {}
+    # a stock with no reading since the open falls back to yesterday's close
+    prev_px = {**_prev_prices(s, tz, snap_day), **open_px}
     yahoo = yahoo_closes.per_share(s)
     since = _held_since(s, tz)
     total = sum(h.value or 0.0 for h in snap.holdings) or 1.0
@@ -500,7 +498,7 @@ def holdings(s: Session, cfg: Settings | None = None) -> dict:
     movers = sorted((x for x in out if x["day_pct"] is not None), key=lambda x: x["day_pct"])
     return {
         "as_of": _iso(snap.ts), "cash": snap.cash, "holdings_value": total, "holdings": out,
-        "day_from": "open" if open_px is not None else "close",
+        "day_from": "open" if open_px else "close",
         "sectors": sorted(({"sector": k, "weight": v} for k, v in sectors.items()), key=lambda x: -x["weight"]),
         "movers": {"up": [m["ticker"] for m in reversed(movers[-3:]) if m["day_pct"] > 0],
                    "down": [m["ticker"] for m in movers[:3] if m["day_pct"] < 0]},
@@ -703,16 +701,17 @@ def _per_year(series: list) -> float | None:
 
 
 def _today_rows(s: Session, snap: PieSnapshot, tz: ZoneInfo, cfg: Settings | None = None) -> tuple[list[DailyRow], bool]:
-    """Today's readings as unit-price rows, from today's open (09:30 in New York, where most of
-    the pie trades). Before the open: from the first reading today. Second value: whether they
-    start at the open."""
+    """The readings since the most recent New York open (where most of the pie trades), as
+    unit-price rows, through after hours and the night until the next open. Before today's open
+    that's yesterday's session; at the weekend, Friday's. ("Today" always runs from a market
+    open, even on a day the record itself starts later.) Second value: whether they start at an
+    open (False only if the pie has no readings since one)."""
+    o = last_ny_open(snap.ts)
+    rows = [r for r in _all_readings(s)[0] if r.date >= o]
+    if rows:
+        return rows, True
     day = _local_date(snap.ts, tz)
-    # "today" always runs from the market open, even on a day the record itself starts later
-    rows = [r for r in _all_readings(s)[0] if r.date.astimezone(tz).date() == day]
-    ny_open = datetime.combine(day, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY).astimezone(timezone.utc)
-    if any(r.date >= ny_open for r in rows):
-        return [r for r in rows if r.date >= ny_open], True
-    return rows, False
+    return [r for r in _all_readings(s)[0] if r.date.astimezone(tz).date() == day], False
 
 
 HOLD_GAP_S = 360   # readings further apart than 6 minutes: the line holds flat through the gap
@@ -730,6 +729,18 @@ def hold_flat(points: list[dict]) -> list[dict]:
                 out.append({**points[i - 1], "t": (t1 - timedelta(seconds=1)).isoformat(), "held": 1})
         out.append(p)
     return out
+
+
+def last_ny_open(ts: datetime) -> datetime:
+    """The most recent New York open (09:30 on a weekday) at or before ts, as aware UTC. Before
+    today's open, that's the previous weekday's; at the weekend, Friday's."""
+    ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    d = ts.astimezone(NY).date()
+    while True:
+        o = datetime.combine(d, datetime.min.time().replace(hour=9, minute=30), tzinfo=NY).astimezone(timezone.utc)
+        if d.weekday() < 5 and o <= ts:
+            return o
+        d -= timedelta(days=1)
 
 
 def _session_bounds(day: date) -> dict:

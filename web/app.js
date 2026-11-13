@@ -309,7 +309,8 @@ function heroNow() {
   heroValue(s.value, s.return_on_deposits);
   // today's move from the open (09:30 New York); before the open, from the first reading today
   const o = s.since_open, d = o ? o.pct : s.day_change_pct, g = o ? o.gbp : s.day_change;
-  const lab = o ? (o.at_open ? "since today's open" : `since ${timeF.format(new Date(o.from))}`) : "today";
+  const fromDay = o && new Date(o.from).toLocaleDateString("en-GB", { timeZone: "Europe/London" }), today = new Date().toLocaleDateString("en-GB", { timeZone: "Europe/London" });
+  const lab = o ? (o.at_open ? (fromDay === today ? "since today's open" : `since ${new Date(o.from).toLocaleDateString("en-GB", { weekday: "long", timeZone: "Europe/London" })}'s open`) : `since ${timeF.format(new Date(o.from))}`) : "today";
   $("#hero-sub").innerHTML = `<span class="delta ${cls(d)}">${arrow(d)} ${pct2(d)} ${lab}</span>${G(gbpS(g))}<span>updated ${timeF.format(new Date(s.as_of))}</span>`;
 }
 function renderStats(p) {   // p: a past daily point while scrubbing the chart, or null for now
