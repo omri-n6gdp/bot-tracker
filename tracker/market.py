@@ -44,7 +44,8 @@ def cached(s: Session, key: str) -> tuple[dict | None, bool]:
     if not row:
         return None, False
     kind = key.split(":", 1)[0]
-    ttl = FAIL_TTL if row.data.get("_error") else TTL.get(kind, timedelta(hours=6))
+    # an error, or old data kept on show after a failed refresh: try again soon
+    ttl = FAIL_TTL if row.data.get("_error") or row.data.get("_kept") else TTL.get(kind, timedelta(hours=6))
     return row.data, (_now() - row.fetched_at) < ttl
 
 
@@ -202,6 +203,11 @@ def _fetch_vol(sym: str, max_expiries: int = 9) -> dict:
 FETCHERS = {"profile": _fetch_profile, "news": _fetch_news, "history": _fetch_history, "vol": _fetch_vol}
 
 
+def _usable(kind: str, data: dict | None) -> bool:
+    """Data worth showing: not an error, and for option prices, an actual surface."""
+    return bool(data) and not data.get("_error") and (kind != "vol" or bool(data.get("available")))
+
+
 def get(s: Session, kind: str, sym: str, allow_fetch: bool = True) -> dict | None:
     key = f"{kind}:{sym}"
     data, fresh = cached(s, key)
@@ -209,11 +215,17 @@ def get(s: Session, kind: str, sym: str, allow_fetch: bool = True) -> dict | Non
         return None if (data or {}).get("_error") else data
     try:
         new = FETCHERS[kind](sym)
+        failed = kind == "vol" and not new.get("available")   # Yahoo had no option prices this time
     except Exception as exc:
         log.warning("%s for %s failed: %s", kind, sym, exc)
-        if data and not data.get("_error"):
-            return data  # stale beats nothing
-        new = {"_error": str(exc)[:200]}
+        new, failed = {"_error": str(exc)[:200]}, True
+    if failed and _usable(kind, data):
+        # keep the last good data on show (marked as kept, with when it was first kept) and try
+        # again after FAIL_TTL; the next good fetch replaces it
+        kept = {**data, "_kept": True, "_kept_since": data.get("_kept_since") or _now().isoformat() + "Z"}
+        _store(s, key, kept)
+        s.commit()
+        return kept
     _store(s, key, new)
     s.commit()
     return None if new.get("_error") else new

@@ -115,6 +115,23 @@ function setupCharts() {
           ctx.fillStyle = COL.bg; ctx.textBaseline = "middle"; ctx.fillText(label, x + 7, y + 0.5); ctx.restore();
         });
       } },
+    { id: "gapBands",  // hatched stripes where the tracker took no readings
+      beforeDatasetsDraw(ch) {
+        const g = ch.options.plugins.gapBands?.gaps; if (!g?.length) return;
+        const { ctx, chartArea: a, scales } = ch;
+        ctx.save(); ctx.beginPath(); ctx.rect(a.left, a.top, a.right - a.left, a.bottom - a.top); ctx.clip();
+        g.forEach(([x0, x1]) => {
+          const l = Math.max(scales.x.getPixelForValue(x0), a.left), r = Math.min(scales.x.getPixelForValue(x1), a.right); if (r - l < 2) return;
+          ctx.fillStyle = "rgba(237,235,230,.035)"; ctx.fillRect(l, a.top, r - l, a.bottom - a.top);
+          ctx.save(); ctx.beginPath(); ctx.rect(l, a.top, r - l, a.bottom - a.top); ctx.clip();
+          ctx.strokeStyle = "rgba(237,235,230,.06)"; ctx.lineWidth = 1; ctx.beginPath();
+          const H = a.bottom - a.top;
+          for (let x = l - H; x < r; x += 9) { ctx.moveTo(x, a.bottom); ctx.lineTo(x + H, a.top); }
+          ctx.stroke(); ctx.restore();
+          if (r - l > 84) { ctx.fillStyle = "rgba(237,235,230,.38)"; ctx.font = "600 11px 'Inter Tight', sans-serif"; ctx.textAlign = "center"; ctx.fillText("no readings", (l + r) / 2, a.bottom - 10); }
+        });
+        ctx.restore();
+      } },
     { id: "scrub",     // a crosshair that follows the pointer and reports the point under it
       afterEvent(ch, args) {
         const o = ch.options.plugins.scrub; if (!o?.onMove) return;
@@ -193,6 +210,7 @@ function show(name, arg) {
   const tab = name === "stock" ? "holdings" : name;
   $$(".nav a").forEach((a) => (a.dataset.view === tab ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
   hidePeek();
+  if (typeof closeFocus === "function") closeFocus(true);
   if (changed) scrollTo(0, 0);
   refresh();
 }
@@ -257,6 +275,7 @@ async function refresh() {
     if (v === "holdings") await all([loadHoldings(), loadRR()]);
     if (v === "quant") await all([loadQuant(), loadVol(), loadDeep()]);
     if (v === "stock" && state.stock) await loadStock(state.stock);
+    if (typeof focusRefreshed === "function") focusRefreshed();
   } catch (e) {
     console.error(e);
     setStatus(null, "Can't reach the tracker right now. The page will try again in a minute.");
@@ -347,7 +366,8 @@ function onScrub(i, px) {
   state.counted = true;
   if (S.intraday) {
     const r = S.even && p.dep ? p.value / p.dep - 1 : p.u != null ? p.u / S.P[0].u - 1 : S.base ? p.value / S.base - 1 : null;
-    $("#hero-label").textContent = S.early ? `${dShort(p.t)} at ${timeF.format(new Date(p.t))}` : `Today at ${timeF.format(new Date(p.t))}`;
+    const sameDay = new Date(p.t).toLocaleDateString("en-GB", { timeZone: "Europe/London" }) === new Date().toLocaleDateString("en-GB", { timeZone: "Europe/London" });
+    $("#hero-label").textContent = `${sameDay ? "Today" : dShort(p.t)} at ${timeF.format(new Date(p.t))}`;
     heroValue(p.value, r);
     $("#hero-sub").innerHTML = `<span class="delta ${cls(r)}">${arrow(r)} ${pct2(r)} ${S.even ? `on ${G(gbp0(p.dep))} paid in` : `since ${S.early ? "the start" : S.baseLabel}`}</span>`;
   } else {
@@ -358,6 +378,12 @@ function onScrub(i, px) {
     renderStats(p);
   }
 }
+// [start, end] of each stretch with no readings: the gap before each held point
+function gapSpans(P) {
+  const out = [];
+  P.forEach((p, i) => { if (p.held && P[i - 1] && P[i + 1]) out.push([new Date(P[i - 1].t).getTime(), new Date(P[i + 1].t).getTime()]); });
+  return out;
+}
 async function loadChart(animate = !state.chartShown) {
   const [h, reb] = await Promise.all([data.history(state.range), data.rebalances()]);
   const P = h.points || [], bc = [COL.blue, COL.grey];
@@ -366,11 +392,13 @@ async function loadChart(animate = !state.chartShown) {
   const chips = state.bench.filter((b) => !h.intraday || h.benchmarks?.some((x) => x.key === b.key))
     .map((b) => `<button class="chip" data-bench="${esc(b.key)}" aria-pressed="${b.on}"><i style="background:${bc[state.bench.indexOf(b) % 2]}"></i>${esc(b.name)}</button>`).join("");
   const usesFut = h.intraday && (h.benchmarks || []).some((b) => state.bench.find((x) => x.key === b.key && x.on) && b.points?.some((p) => p.f));
+  const gaps = h.intraday ? gapSpans(P) : [];
   box.innerHTML = `<span><i style="background:${COL.amber}"></i>The bot</span>` + chips + (usesFut ? `<span title="Dashed: no S&P 500 fund was trading (roughly 01:00-08:00 UK), so the line follows S&P 500 futures, which trade nearly around the clock."><i class="dash" style="border-color:${COL.blue}"></i>S&P futures, funds shut</span>` : "") + (h.intraday ? `<span><i style="background:${COL.faint}"></i>${esc(h.baseline_label || "Yesterday's close")}</span>`
-    : (h.has_deposits ? `<span><i style="background:${COL.faint}"></i>Break-even</span>` : "") + `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`);
+    : (h.has_deposits ? `<span><i style="background:${COL.faint}"></i>Break-even</span>` : "") + `<span><i style="background:${COL.amber};width:7px;height:7px;border-radius:2px"></i>a move</span>`)
+    + (gaps.length ? `<span title="The tracker took no readings here (it was switched off). Both lines hold flat across the gap, then pick up from the next reading."><i class="hatch"></i>No readings</span>` : "");
   $$("[data-bench]", box).forEach((el) => el.addEventListener("click", () => { const b = state.bench.find((x) => x.key === el.dataset.bench); b.on = !b.on; loadChart(false); }));
   let datasets, yFmt;
-  state.series = { P, intraday: !!h.intraday, early: !!h.early, even: !!h.even || (!h.intraday && !!h.has_deposits), base: h.baseline || P[0]?.value, baseLabel: (h.baseline_label || "Yesterday's close").toLowerCase() };
+  state.series = { P, label: h.baseline_label, anchorReading: h.anchor_reading, anchor: h.anchor, intraday: !!h.intraday, early: !!h.early, even: !!h.even || (!h.intraday && !!h.has_deposits), base: h.baseline || P[0]?.value, baseLabel: (h.baseline_label || "Yesterday's close").toLowerCase() };
   const thin = P.length < 2, note = $("#chart-empty");
   note.hidden = !thin;
   note.textContent = h.intraday ? "Today's line appears once the tracker has a few minutes of prices." : "The chart starts after the first full day with money in the pie.";
@@ -383,7 +411,7 @@ async function loadChart(animate = !state.chartShown) {
     state.bench.forEach((b, i) => { const hb = b.on && h.benchmarks?.find((x) => x.key === b.key); if (hb?.points?.length) datasets.push({ label: b.name, segment: FUT_DASH, data: hb.points.map((p) => ({ x: new Date(p.t).getTime(), y: p.pct, f: p.f })), borderColor: bc[i % 2], borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 0, tension: 0.2, order: 2, tag: pct2 }); });
     // where the money started: break-even, straight down (or up) to the bot's first reading
     if (h.origin && d.length) datasets.push({ label: "Start", data: [{ x: d[0].x, y: 0 }, d[0]], borderColor: COL.amber, borderWidth: 2.2, pointRadius: [3.5, 0], pointBackgroundColor: COL.amber, pointHoverRadius: 0, noScrub: true, order: 1 });
-    if (d.length) datasets.push({ label: h.baseline_label || "Yesterday's close", data: [{ x: h.session && !h.early ? new Date(h.session.open).getTime() : d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
+    if (d.length) datasets.push({ label: h.baseline_label || "Yesterday's close", data: [{ x: h.start ? new Date(h.start).getTime() : d[0].x, y: 0 }, { x: d.at(-1).x, y: 0 }], borderColor: COL.faint, borderDash: [4, 4], borderWidth: 1.2, pointRadius: 0, pointHoverRadius: 0, noScrub: true });
   } else {
     const ev = !!h.has_deposits;   // 0% = break-even: worth what's been paid in
     const main = P.map((p) => ({ x: tms(p.t), y: ev && p.deposits ? p.value / p.deposits - 1 : p.pie }));
@@ -396,9 +424,15 @@ async function loadChart(animate = !state.chartShown) {
       data: reb.filter((r) => new Date(r.ts).getTime() >= first - 864e5).map((r) => { const x = new Date(r.ts).getTime(), pt = main[nearest(main, x)]; return { x, y: pt?.y }; }).filter((p) => p.y != null) });
   }
   const o = timeOpts(yFmt, { intraday: h.intraday, tags: true, tooltip: false });
-  // 1D: the whole New York session across the chart, like a live day chart
-  if (h.session && !h.early) o.scales.x.min = new Date(h.session.open).getTime();
+  // 1D: from 09:00 UK time at the left edge
+  if (h.start) {
+    o.scales.x.min = new Date(h.start).getTime();
+    // round hours along the bottom: 09:00, 11:00, 13:00 ...
+    const hrs = (Date.now() - o.scales.x.min) / 3600e3, step = hrs > 30 ? 6 : hrs > 20 ? 4 : hrs > 8 ? 2 : hrs > 3 ? 1 : null;
+    if (step) { o.scales.x.time.unit = "hour"; o.scales.x.time.stepSize = step; o.scales.x.ticks.stepSize = step; o.scales.x.ticks.maxTicksLimit = 12; }
+  }
   o.plugins.scrub = { onMove: onScrub };
+  o.plugins.gapBands = { gaps };
   o.events = ["mousemove", "mouseout", "touchstart", "touchmove", "touchend"];
   const ch = chart("main-chart", { type: "line", data: { datasets }, options: o });
   if (animate && P.length > 2) { state.chartShown = true; reveal(ch); }
@@ -1065,6 +1099,27 @@ async function loadQuant() {
 
 /* volatility surface, with a smile and term structure beside it */
 const surfaces = {};
+// option surfaces: fetched again every 10 minutes, so a surface showing the last known prices
+// (live ones unavailable) switches to live data on its own once there is some
+const VOL_TTL = 10 * 60e3, volAt = {};
+function volData(t) {
+  const k = `vol-${t}`;
+  if (cache[k] && Date.now() - (volAt[t] || 0) > VOL_TTL) delete cache[k];
+  if (!cache[k]) volAt[t] = Date.now();
+  return load(k, `/api/volsurface/${encodeURIComponent(t)}`);
+}
+const volSig = (d) => (d ? `${d.available}|${d.as_of}|${!!d.stale}` : "none");
+// a note on a surface that's showing the last known prices
+function staleNote(host, d) {
+  host.querySelector(".stale-note")?.remove();
+  if (!d?.stale) return;
+  const when = d.as_of ? `${dShort(d.as_of.slice(0, 10))} at ${timeF.format(new Date(d.as_of))}` : "earlier";
+  const n = document.createElement("p");
+  n.className = "stale-note";
+  n.title = "Yahoo has no live option prices right now. The surface keeps the last ones it had and updates on its own when live prices are back (checked every 10 minutes).";
+  n.textContent = d.pie ? `${d.stale_count} stock${d.stale_count === 1 ? "" : "s"} on last known prices (oldest ${when})` : `Last known option prices, from ${when}`;
+  host.append(n);
+}
 async function loadVol() {
   const hs = (state.empty ? state.holdingsData?.holdings || [] : held()).filter((h) => /_US_EQ$/.test(h.ticker)).sort((a, b) => (b.weight || 0) - (a.weight || 0));
   const pick = $("#vol-pick");
@@ -1073,15 +1128,17 @@ async function loadVol() {
   if (state.volTicker !== "PIE" && !hs.some((h) => h.ticker === state.volTicker)) state.volTicker = "PIE";
   if (pick.options.length !== hs.length + 1) pick.innerHTML = `<option value="PIE"${state.volTicker === "PIE" ? " selected" : ""}>The whole pie</option>` + hs.map((h) => `<option value="${esc(h.ticker)}"${h.ticker === state.volTicker ? " selected" : ""}>${esc(h.symbol)}  ${esc(h.name)}</option>`).join("");
   pick.onchange = () => { state.volTicker = pick.value; drawVol(); };
-  if (state.volDrawn !== state.volTicker || !surfaces["vol-surface"]) await drawVol();
+  let d = null; try { d = await volData(state.volTicker); } catch { /* drawn as unavailable */ }
+  if (state.volDrawn !== state.volTicker || !surfaces["vol-surface"] || state.volSig !== volSig(d)) await drawVol();
 }
 async function drawVol() {
   const t = state.volTicker, host = $("#vol-surface");
   state.volDrawn = t;
   surfaces["vol-surface"]?.destroy(); surfaces["vol-surface"] = null;
   host.innerHTML = `<p class="empty">Loading option prices…</p>`;
-  let d; try { d = await load(`vol-${t}`, `/api/volsurface/${encodeURIComponent(t)}`); } catch { d = { available: false }; }
+  let d; try { d = await volData(t); } catch { d = { available: false }; }
   if (state.volTicker !== t) return;
+  state.volSig = volSig(d);
   $("#view-quant").classList.toggle("no-vol", !d.available);
   if (!d.available || !window.VolSurface) {
     host.innerHTML = `<p class="empty">No option prices available for ${t === "PIE" ? "the pie's stocks" : esc(sym(t))} right now.</p>`; $("#vol-expiries").innerHTML = ""; $("#smile-meta").textContent = "";
@@ -1091,6 +1148,7 @@ async function drawVol() {
   const { M, E, Z } = VolSurface.prep(d), atm = M.findIndex((m) => Math.abs(m - 1) < 1e-6);
   let cur = E.reduce((b, e, i) => (Math.abs(e.days - 45) < Math.abs(E[b].days - 45) ? i : b), 0);
   const s3 = (surfaces["vol-surface"] = VolSurface.render(host, d, { highlight: cur, onPick: (days) => select(E.findIndex((e) => e.days === days)) }));
+  staleNote(host, d);
   const lineOpts = (xFmt, yTitle) => ({ responsive: true, maintainAspectRatio: false, animation: false, parsing: false, interaction: { mode: "nearest", axis: "x", intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { title: (it) => xFmt(it[0].raw.x), label: (it) => ` ${p0(it.raw.y)} implied vol` } } },
     scales: { x: { type: "linear", grid: { display: false }, border: { display: false }, ticks: { callback: xFmt, maxTicksLimit: 6 }, title: { display: true, text: yTitle, color: COL.faint } }, y: { grid: { color: COL.hair }, border: { display: false }, ticks: { callback: (v) => p0(v), maxTicksLimit: 5 } } } });
   const smileOpts = lineOpts((x) => `${Math.round(x * 100)}%`, "strike, % of price now");
@@ -1174,11 +1232,11 @@ async function loadStock(ticker) {
   const volCard = $("#s-vol-card"), statsCard = $("#s-stats-card");
   surfaces["s-surface"]?.destroy(); surfaces["s-surface"] = null;
   let vd = { available: false };
-  if (/_US_EQ$/.test(ticker)) { volCard.hidden = false; statsCard.className = "card s4"; $("#s-stats").classList.remove("wide"); $("#s-surface").innerHTML = `<p class="empty">Loading option prices…</p>`; try { vd = await load(`vol-${ticker}`, `/api/volsurface/${encodeURIComponent(ticker)}`); } catch { /* shown as unavailable */ } }
+  if (/_US_EQ$/.test(ticker)) { volCard.hidden = false; statsCard.className = "card s4"; $("#s-stats").classList.remove("wide"); $("#s-surface").innerHTML = `<p class="empty">Loading option prices…</p>`; try { vd = await volData(ticker); } catch { /* shown as unavailable */ } }
   if (state.stock !== ticker) return;
   const ok = vd.available && window.VolSurface;
   volCard.hidden = !ok; statsCard.className = `card ${ok ? "s4" : "s12"}`; $("#s-stats").classList.toggle("wide", !ok);
-  if (ok) { surfaces["s-surface"] = VolSurface.render($("#s-surface"), vd); $("#s-vol-meta").textContent = `from option prices, share price ${money(vd.spot, "USD")}`; }
+  if (ok) { surfaces["s-surface"] = VolSurface.render($("#s-surface"), vd); staleNote($("#s-surface"), vd); $("#s-vol-meta").textContent = vd.stale ? `last known option prices, share price then ${money(vd.spot, "USD")}` : `from option prices, share price ${money(vd.spot, "USD")}`; }
 }
 // 1D: minute prices for the latest New York session, from the open
 state.stockDay = {};

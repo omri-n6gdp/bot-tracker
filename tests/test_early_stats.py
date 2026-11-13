@@ -92,14 +92,80 @@ def test_early_return_is_measured_from_the_first_reading(tmp_path):
     assert sm["started"] and sm["returns"]["ALL"] == pytest.approx(938 / 920 - 1)  # cash £20 included
 
 
-def test_1d_chart_is_measured_from_todays_open(tmp_path):
-    # readings from 14:20 (before the 14:30 London / 09:30 New York open) to 14:39
+def test_1d_chart_starts_at_the_first_reading_when_the_record_is_younger(tmp_path):
+    # the record starts at 14:20 Thursday, after 09:00: the chart starts there
     S = _readings(tmp_path, [900 + i for i in range(20)], start=datetime(2026, 11, 12, 14, 20))
     with S() as s:
         h = service.history(s, Settings(stale_after_s=10**9), "1D")
-    assert h["baseline_label"] == "Today's open"
-    assert h["points"][0]["t"].startswith("2026-11-12T14:30")
-    assert h["baseline"] == pytest.approx(910 + 20)  # first reading at the open, cash included
+    assert h["baseline_label"] == "Start of the record" and h["anchor"] is None
+    assert h["points"][0]["t"].startswith("2026-11-12T14:20") and h["start"] == h["points"][0]["t"]
+    assert h["baseline"] == pytest.approx(900 + 20)  # cash included
+
+
+def test_1d_chart_runs_from_9am(tmp_path):
+    # Thursday 08:50-09:09 (London = UTC in November), then readings in the afternoon
+    S = _readings(tmp_path, [900.0 + i for i in range(20)], start=datetime(2026, 11, 12, 8, 50))
+    with S() as s:
+        for k in range(5):
+            s.add(PieSnapshot(ts=datetime(2026, 11, 12, 15, k), value=950.0, holdings_value=950.0, cash=20.0))
+        s.commit()
+        h = service.history(s, Settings(stale_after_s=10**9), "1D")
+    p = h["points"]
+    assert h["anchor"] == "2026-11-12T09:00:00+00:00" and h["start"] == h["anchor"]
+    assert h["baseline_label"] == "09:00 today"
+    assert p[0]["t"] == h["anchor"] and p[0]["value"] == pytest.approx(910 + 20)   # the 09:00 reading
+    assert p[1]["t"].startswith("2026-11-12T09:01")
+    assert p[-1]["u"] / p[0]["u"] - 1 == pytest.approx(970 / 930 - 1)
+
+
+def test_1d_market_line_is_read_at_the_same_moments(tmp_path, monkeypatch):
+    from tracker import intraday
+    S = _readings(tmp_path, [900.0 + i for i in range(20)], start=datetime(2026, 11, 12, 8, 50))
+    with S() as s:
+        s.add(PieSnapshot(ts=datetime(2026, 11, 12, 15, 0), value=950.0, holdings_value=950.0, cash=20.0))
+        s.commit()
+        T = lambda h, m: datetime(2026, 11, 12, h, m, tzinfo=timezone.utc)
+        # the market: 100 at 09:00, futures late morning, 110 by 15:00
+        src = [(T(8, 59), 99.0, "spot"), (T(9, 0), 100.0, "spot"), (T(9, 5), 101.0, "spot"),
+               (T(11, 0), 104.0, "fut"), (T(14, 59), 110.0, "spot")]
+        monkeypatch.setattr(intraday, "gbp_series_src", lambda s_, tk: src)
+        h = service.history(s, Settings(stale_after_s=10**9), "1D")
+    pie, mkt = h["points"], h["benchmarks"][0]["points"]
+    assert [x["t"] for x in mkt] == [x["t"] for x in pie]                 # one market point for every pie point
+    assert mkt[0]["pct"] == 0.0                                           # both start at 0 at 09:00
+    by_t = {x["t"]: x for x in mkt}
+    assert by_t["2026-11-12T09:05:00+00:00"]["pct"] == pytest.approx(0.01)
+    held = next(x for x in pie if x.get("held"))                          # the tracker's gap: both hold flat
+    assert by_t[held["t"]]["pct"] == pytest.approx(0.01)
+    assert mkt[-1]["pct"] == pytest.approx(0.10)
+
+
+def test_1d_both_lines_start_from_the_same_reading(tmp_path, monkeypatch):
+    # the tracker was off at 09:00: its last reading was at 08:20, so the market starts from 08:20 too
+    from tracker import intraday
+    S = _readings(tmp_path, [900.0, 901.0], start=datetime(2026, 11, 12, 8, 19))
+    with S() as s:
+        s.add(PieSnapshot(ts=datetime(2026, 11, 12, 14, 50), value=905.0, holdings_value=905.0, cash=20.0))
+        s.commit()
+        T = lambda h, m: datetime(2026, 11, 12, h, m, tzinfo=timezone.utc)
+        src = [(T(8, 20), 100.0, "spot"), (T(9, 0), 102.0, "spot"), (T(14, 50), 103.0, "spot")]
+        monkeypatch.setattr(intraday, "gbp_series_src", lambda s_, tk: src)
+        h = service.history(s, Settings(stale_after_s=10**9), "1D")
+    assert h["anchor_reading"].startswith("2026-11-12T08:20")
+    mkt = h["benchmarks"][0]["points"]
+    assert mkt[0]["pct"] == 0.0 and mkt[-1]["pct"] == pytest.approx(0.03)   # from 08:20 for both, not from 09:00 (+2%)
+
+
+def test_day_start():
+    utc = timezone.utc
+    ds = lambda *a: service.day_start(datetime(*a, tzinfo=utc)).isoformat()
+    assert ds(2026, 11, 13, 14, 0) == "2026-11-13T09:00:00+00:00"     # Friday afternoon: 09:00 today
+    assert ds(2026, 11, 13, 9, 0) == "2026-11-13T09:00:00+00:00"      # resets at 09:00 exactly
+    assert ds(2026, 11, 13, 8, 59) == "2026-11-12T09:00:00+00:00"     # 08:59: still from yesterday's 09:00
+    assert ds(2026, 11, 14, 12, 0) == "2026-11-13T09:00:00+00:00"     # Saturday: Friday's
+    assert ds(2026, 11, 16, 8, 0) == "2026-11-13T09:00:00+00:00"      # Monday before 09:00: Friday's
+    assert ds(2026, 11, 16, 10, 0) == "2026-11-16T09:00:00+00:00"
+    assert ds(2026, 7, 10, 8, 30) == "2026-07-10T08:00:00+00:00"      # summer: 09:00 UK is 08:00 UTC
 
 
 def test_early_days_every_range_shows_the_readings(tmp_path):
@@ -258,6 +324,31 @@ def test_longer_charts_are_against_break_even(tmp_path):
     assert [round(p["value"] / p["dep"] - 1, 4) for p in h["points"]] == [round(920 / 950 - 1, 4), round(929 / 950 - 1, 4), round(938 / 950 - 1, 4)]
 
 
+def test_market_is_measured_from_the_close_before(tmp_path, monkeypatch):
+    """The pie's first reading is at 14:45 on Thursday. The market is measured from Wednesday's
+    close (21:00): at 14:45 its line goes straight up from 0 to its move since then."""
+    from datetime import date as d_
+    from tracker import intraday
+    from tracker.db import Contribution
+    T = lambda d, h, m: datetime(2026, 11, d, h, m, tzinfo=timezone.utc)
+    ser = [(T(11, 20, 59), 98.0), (T(12, 14, 29), 100.0), (T(12, 14, 31), 102.0), (T(12, 14, 46), 103.0)]
+    monkeypatch.setattr(intraday, "gbp_series_src", lambda s, ticker: [(a, b, "spot") for a, b in ser])
+    monkeypatch.setattr(intraday, "gbp_series", lambda s, ticker: ser)
+    S = _readings(tmp_path, [900.0, 909.0], cash=20.0, start=datetime(2026, 11, 12, 14, 45))
+    with S() as s:
+        s.add(Contribution(date=d_(2026, 11, 12), amount=950.0, note="in"))
+        s.commit()
+        cfg = Settings(stale_after_s=10**9, benchmarks=(("VUAG.L", "S&P 500"),))
+        h = service.history(s, cfg, "ALL")
+        b = service.summary(s, cfg)["bench_on_deposits"]
+    assert service.market_from(T(12, 14, 45)).isoformat() == "2026-11-11T21:00:00+00:00"
+    m, first = h["benchmarks"][0]["points"], h["points"][0]["t"]
+    assert m[0] == {"t": first, "pct": 0.0}                              # from 0 ...
+    assert m[1]["t"] == first and m[1]["pct"] == pytest.approx(102 / 98 - 1)   # ... straight to its move since the close
+    assert m[-1]["pct"] == pytest.approx(103 / 98 - 1)
+    assert b["VUAG.L"]["return"] == pytest.approx(103 / 98 - 1)          # the headline number agrees
+
+
 def test_stock_minute_prices_from_its_open(tmp_path, monkeypatch):
     pts = [["2026-11-11T20:59:00+00:00", 173.0], ["2026-11-12T14:30:00+00:00", 150.0], ["2026-11-12T19:00:00+00:00", 165.0]]
     monkeypatch.setattr(market, "yahoo_symbol", lambda s, tk: "AAA")
@@ -345,7 +436,16 @@ def test_1d_runs_from_the_most_recent_open(tmp_path):
         s.commit()
         h = service.history(s, Settings(stale_after_s=10**9), "1D")
         o = service.summary(s, Settings(stale_after_s=10**9))["since_open"]
-    assert h["points"][0]["t"].startswith("2026-11-12T14:30") and h["baseline_label"] == "Thu's open"
-    assert h["session"]["open"] == "2026-11-12T14:30:00+00:00"
+    assert h["points"][0]["t"].startswith("2026-11-12T14:30") and h["baseline_label"] == "Start of the record"
     assert o["at_open"] and o["from"].startswith("2026-11-12T14:30") and o["pct"] == pytest.approx(932 / 920 - 1)
     assert service.last_ny_open(datetime(2026, 11, 15, 12, tzinfo=timezone.utc)).isoformat() == "2026-11-13T14:30:00+00:00"  # Sunday: Friday's
+
+
+def test_market_is_read_at_the_pies_moments():
+    pie = service.hold_flat([{"t": "2026-11-12T20:00:00+00:00", "u": 1.0}, {"t": "2026-11-12T20:01:00+00:00", "u": 1.01},
+                             {"t": "2026-11-13T14:30:00+00:00", "u": 1.02}])
+    mkt = [{"t": "2026-11-12T20:00:00+00:00", "pct": 0.0}, {"t": "2026-11-12T20:00:30+00:00", "pct": 0.001},
+           {"t": "2026-11-13T03:00:00+00:00", "pct": 0.02, "f": 1}, {"t": "2026-11-13T14:29:00+00:00", "pct": 0.005}]
+    out = service._same_moments(pie, mkt)
+    assert [p["t"] for p in out] == [p["t"] for p in pie]
+    assert [p["pct"] for p in out] == [0.0, 0.001, 0.001, 0.005]   # flat through the tracker's gap, like the pie

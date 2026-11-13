@@ -49,6 +49,10 @@ the app: right-click it, choose Open, then Open again.
 
 The eye button hides every £ amount, for showing the page to someone without showing the sums.
 
+**Click any block** (a chart, list or table) to open it larger in a focus window, with what it shows, where its numbers come from, and a few lines on what the live numbers say about the bot right now. Esc or a click outside closes it. The explanations live in `web/focus.js`.
+
+The **1D** chart runs from 09:00 UK time to now and resets at 09:00 every day (before 09:00 it runs from 09:00 yesterday; at the weekend it stays on Friday; `DAY_START_HOUR` in `tracker/service.py`). The S&P 500 line is read at exactly the same moments as the pie, from its own price at 09:00, so the two lines compare like for like; on every early-days chart, both lines hold flat through stretches when the tracker took no readings (hatched).
+
 Also on the Overview:
 
 - **Today's recap**: the day in a few lines (since the open against the S&P, best and worst stock, any move, the game). Saved at the 21:30 close and sent to Telegram when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set (use a group's chat id so friends get it).

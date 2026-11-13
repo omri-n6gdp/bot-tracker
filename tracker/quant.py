@@ -180,6 +180,8 @@ def pie_vol_surface(s: Session, holdings: list[dict]) -> dict:
         v = market.get(s, "vol", sym, allow_fetch=False) if sym else None
         if v and v.get("available") and h.get("weight"):
             surfs[h["ticker"]], weights[h["ticker"]] = v, h["weight"]
+    # stocks showing their last known option prices because live ones weren't available
+    kept = [v.get("as_of") for v in surfs.values() if v.get("_kept")]
     if len(surfs) < 3:
         return {"available": False}
     per = yahoo_closes.per_share(s)
@@ -208,7 +210,8 @@ def pie_vol_surface(s: Session, holdings: list[dict]) -> dict:
             "atm_term": [{"days": u["days"], "iv": r[atm]} for u, r in zip(used, rows)],
             "sqrt_t": [round(math.sqrt(u["days"] / 365), 4) for u in used],
             "covered": len(tick), "weight_covered": covered,
-            "as_of": datetime.now(timezone.utc).isoformat()}
+            "as_of": min(kept) if kept else datetime.now(timezone.utc).isoformat(),
+            "stale": bool(kept), "stale_count": len(kept)}
 
 
 # ---------------------------------------------------------------- build
