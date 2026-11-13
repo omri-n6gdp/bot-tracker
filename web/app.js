@@ -115,6 +115,21 @@ function setupCharts() {
           ctx.fillStyle = COL.bg; ctx.textBaseline = "middle"; ctx.fillText(label, x + 7, y + 0.5); ctx.restore();
         });
       } },
+    { id: "breaks",    // squeezed minute charts: a dashed marker where the market was shut
+      afterDatasetsDraw(ch) {
+        const b = ch.options.plugins.breaks?.at; if (!b?.length) return;
+        const { ctx, chartArea: a, scales } = ch;
+        ctx.save(); ctx.strokeStyle = "rgba(237,235,230,.28)"; ctx.setLineDash([3, 4]); ctx.lineWidth = 1;
+        ctx.fillStyle = "rgba(237,235,230,.5)"; ctx.font = "600 10.5px 'Inter Tight', sans-serif"; ctx.textAlign = "left";
+        let lastEnd = -Infinity;
+        b.forEach(({ x, label }) => {
+          const px = scales.x.getPixelForValue(x); if (px < a.left || px > a.right) return;
+          ctx.beginPath(); ctx.moveTo(px, a.top); ctx.lineTo(px, a.bottom); ctx.stroke();
+          const w = label ? ctx.measureText(label).width : 0, lx = Math.min(px + 4, a.right - w);
+          if (label && lx > lastEnd + 6) { ctx.fillText(label, lx, a.top + 10); lastEnd = lx + w; }
+        });
+        ctx.restore();
+      } },
     { id: "gapBands",  // hatched stripes where the tracker took no readings
       beforeDatasetsDraw(ch) {
         const g = ch.options.plugins.gapBands?.gaps; if (!g?.length) return;
@@ -187,6 +202,19 @@ function timeOpts(yFmt, { intraday = false, tags = false, tagPad = 62, tooltip =
       y: { position: tags ? "left" : "right", grid: { color: COL.hair, drawTicks: false }, border: { display: false }, ticks: { maxTicksLimit: 6, padding: 10, callback: yFmt } },
     },
   };
+}
+// minute charts from trading-hours readings: the hours the market is shut are squeezed out.
+// Points are plotted by reading number (one a minute while trading), labelled with their real
+// times, with a dashed marker where a session starts after a closed stretch.
+const londonDay = (t) => new Date(t).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "Europe/London" });
+function squeezeX(o, times) {
+  const br = [];
+  for (let i = 1; i < times.length; i++) if (times[i] - times[i - 1] > 30 * 60e3) { const d = londonDay(times[i]); br.push({ x: i - 0.5, label: d !== londonDay(times[i - 1]) ? d : "" }); }
+  o.scales.x = { type: "linear", min: 0, max: Math.max(times.length - 1, 1), grid: { display: false }, border: { display: false },
+    ticks: { maxTicksLimit: innerWidth < 720 ? 4 : 8, maxRotation: 0, padding: 8, callback: (v) => { const t = times[Math.round(v)]; return t == null ? "" : timeF.format(new Date(t)); } } };
+  o.plugins.tooltip.callbacks.title = (it) => { const t = times[Math.round(it[0].raw.x)]; return t == null ? "" : `${londonDay(t)} ${timeF.format(new Date(t))}`; };
+  o.plugins.breaks = { at: br };
+  return o;
 }
 const areaFill = (hex, top = "3A") => (ctx) => {
   const a = ctx.chart.chartArea; if (!a) return "transparent";
@@ -634,11 +662,12 @@ function drawRolling() {
   const R = (src === "pie" ? q.pie_rolling : q.rolling) || [];
   if (R.length < 3) { $("#rb-meta").textContent = ""; chartNote("rb-chart", src === "pie" ? "Needs about half an hour of readings." : "Needs a few months of prices."); return; }
   chartNote("rb-chart", null);
-  const L = R.at(-1), xs = R.map((r) => new Date(r.t).getTime());
+  const L = R.at(-1), ts = R.map((r) => new Date(r.t).getTime()), sq = src === "pie", xs = sq ? R.map((_, i) => i) : ts;
   $("#rb-meta").innerHTML = (src === "pie" ? `This pie against the S&P, over a moving ${q.pie_window} readings (about ${q.pie_window} minutes).` : `${mixNote()} Against the S&P over a moving three months.`)
     + ` Beta now <b>${n2(L.beta)}</b> (95% range ${n2(L.lo)} to ${n2(L.hi)}): when the S&P moves 1%, the pie has moved about ${n2(L.beta)}%. Alpha, a year at this pace: <b class="${cls(L.alpha)}">${pct(L.alpha)}</b>`
     + warn(src === "pie" ? "From minute readings over a very short time: alpha especially is scaled up from minutes to a year and means very little yet." : null);
   const o = timeOpts((v) => n2(v), { intraday: src === "pie" });
+  if (sq) squeezeX(o, ts);
   o.scales.y.position = "left";
   o.scales.y2 = { position: "right", grid: { display: false }, border: { display: false }, ticks: { callback: (v) => pct(v), maxTicksLimit: 6 } };
   o.plugins.tooltip.filter = (it) => !it.dataset.band;
@@ -1020,14 +1049,18 @@ async function loadQuant() {
   if (state.calTf == null) state.calTf = rd ? "15" : "D";
   if (state.histTf == null) state.histTf = rd ? "1" : "D";
   drawSquares(); drawHist();
-  chart("dd-chart", { type: "line", data: { datasets: [{ label: "Below the high", data: (st.drawdown || []).map((p) => ({ x: tms(p.t), y: p.dd })), borderColor: COL.down, backgroundColor: areaFill(COL.down, "55"), fill: "origin", borderWidth: 1.6, pointRadius: 0 }] }, options: timeOpts(pct) });
+  const DD = st.drawdown || [], ddT = DD.map((p) => tms(p.t));
+  chart("dd-chart", { type: "line", data: { datasets: [{ label: "Below the high", data: DD.map((p, i) => ({ x: rd ? i : ddT[i], y: p.dd })), borderColor: COL.down, backgroundColor: areaFill(COL.down, "55"), fill: "origin", borderWidth: 1.6, pointRadius: 0 }] },
+    options: rd ? squeezeX(timeOpts(pct, { intraday: true }), ddT) : timeOpts(pct) });
   setTitle("#roll-meta", rd ? "Rolling 20-minute return" : "Rolling 20-day return");
   const roll = a.rolling20 || [];
   chartNote("roll-chart", roll.length ? null : rd ? "Needs 20 minutes of readings." : "Needs 20 trading days of daily closes.");
   $("#roll-meta").textContent = roll.length ? `ahead of the ${bn} ${p0(roll.filter((p) => p.bench != null && p.bot > p.bench).length / roll.length)} of the time` : "";
+  const rT = roll.map((p) => tms(p.t)), rx = (i) => (rd ? i : rT[i]);
   chart("roll-chart", { type: "line", data: { datasets: [
-    { label: "The bot", data: roll.map((p) => ({ x: tms(p.t), y: p.bot })), borderColor: COL.amber, borderWidth: 1.9, pointRadius: 0 },
-    { label: v.name || "Benchmark", data: roll.filter((p) => p.bench != null).map((p) => ({ x: tms(p.t), y: p.bench })), borderColor: COL.blue, borderWidth: 1.4, pointRadius: 0 }] }, options: timeOpts(pct) });
+    { label: "The bot", data: roll.map((p, i) => ({ x: rx(i), y: p.bot })), borderColor: COL.amber, borderWidth: 1.9, pointRadius: 0 },
+    { label: v.name || "Benchmark", data: roll.map((p, i) => (p.bench == null ? null : { x: rx(i), y: p.bench })).filter(Boolean), borderColor: COL.blue, borderWidth: 1.4, pointRadius: 0 }] },
+    options: rd ? squeezeX(timeOpts(pct, { intraday: true }), rT) : timeOpts(pct) });
 
   // how the holdings move together
   const cg = $("#corr");

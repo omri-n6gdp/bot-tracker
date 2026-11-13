@@ -407,7 +407,7 @@ const EXPLAIN = {
 
   dd: {
     title: "Underwater",
-    what: "How far the pie is below its highest value so far, at every point. 0% means it's at a new high; the deeper the red, the bigger the fall it still has to recover.",
+    what: () => "How far the pie is below its highest value so far, at every point. 0% means it's at a new high; the deeper the red, the bigger the fall it still has to recover." + (early() ? " While the figures come from minute readings, the hours the market is shut are squeezed out so the trading sessions sit side by side; a dashed line marks where a new session starts." : ""),
     source: () => (early() ? "From the pie's minute readings (its unit price), so deposits don't count as gains." : "From the pie's daily closes (its unit price), so deposits don't count as gains."),
     live: async () => {
       const st = await data.stats(), a = state.analysis, D = st.drawdown || [], out = [];
@@ -421,7 +421,7 @@ const EXPLAIN = {
   },
 
   roll: {
-    what: () => `The return over the last 20 ${early() ? "minutes" : "trading days"}, recalculated at every point, for the pie (amber) and the ${bn()} (blue). It shows whether the bot's recent stretch is better or worse than the market's, without one old day dominating.`,
+    what: () => `The return over the last 20 ${early() ? "minutes" : "trading days"}, recalculated at every point, for the pie (amber) and the ${bn()} (blue). It shows whether the bot's recent stretch is better or worse than the market's, without one old day dominating.${early() ? " While the figures come from minute readings, the hours the market is shut are squeezed out so the trading sessions sit side by side; a dashed line marks where a new session starts." : ""}`,
     source: () => `${early() ? "The pie's minute readings" : "The pie's daily closes"}; ${SRC.bench}`,
     live: async () => {
       const r = state.analysis?.rolling20 || []; if (!r.length) return ["Not enough readings yet."];
