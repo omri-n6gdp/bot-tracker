@@ -449,3 +449,16 @@ def test_market_is_read_at_the_pies_moments():
     out = service._same_moments(pie, mkt)
     assert [p["t"] for p in out] == [p["t"] for p in pie]
     assert [p["pct"] for p in out] == [0.0, 0.001, 0.001, 0.005]   # flat through the tracker's gap, like the pie
+
+
+def test_market_line_holds_flat_over_the_weekend():
+    T = lambda d, h, m: datetime(2026, 11, d, h, m, tzinfo=timezone.utc)
+    pie = service.hold_flat([{"t": T(13, 20, 0).isoformat(), "u": 1.0}] + [{"t": (T(14, 12, 0) + timedelta(minutes=k)).isoformat(), "u": 1.0} for k in range(3)])
+    mkt = [{"t": T(13, 20, 0).isoformat(), "pct": 0.01}, {"t": T(14, 0, 59).isoformat(), "pct": 0.012}]   # Friday's last price
+    out = service._same_moments(pie, mkt)
+    assert [p["t"] for p in out] == [p["t"] for p in pie] and out[-1]["pct"] == 0.012   # carries on flat on Saturday
+    assert service.market_shut(T(14, 12, 0)) and service.market_shut(T(15, 22, 0))         # Saturday; Sunday 17:00 New York
+    assert not service.market_shut(T(15, 23, 30)) and not service.market_shut(T(13, 20, 0))   # futures back; Friday 15:00 New York
+    # on a weekday, missing prices still stop the line instead of faking a flat one
+    wk = service.hold_flat([{"t": T(12, 15, 0).isoformat(), "u": 1.0}, {"t": T(12, 16, 0).isoformat(), "u": 1.0}])
+    assert [p["t"][11:16] for p in service._same_moments(wk, [{"t": T(12, 15, 0).isoformat(), "pct": 0.0}])] == ["15:00", "15:59"]   # stops before 16:00

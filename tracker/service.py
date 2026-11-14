@@ -757,6 +757,20 @@ def day_start(ts: datetime, tz: ZoneInfo = ZoneInfo("Europe/London")) -> datetim
 BENCH_STALE_S = 600   # past its last price by more than this, a benchmark line stops instead of running flat
 
 
+def market_shut(ts: datetime) -> bool:
+    """The weekend, when nothing that tracks the S&P 500 trades: from the end of Friday's after
+    hours (20:00 New York) until index futures reopen (18:00 New York on Sunday). A market line
+    holds flat at its last price then, rather than stopping."""
+    et = intraday.utc(ts).astimezone(NY)
+    wd = et.weekday()
+    return wd == 5 or (wd == 4 and et.hour >= 20) or (wd == 6 and et.hour < 18)
+
+
+def _stale(t: datetime, last: datetime) -> bool:
+    """No market price for too long while the market should be trading: stop the line there."""
+    return (t - last).total_seconds() > BENCH_STALE_S and not market_shut(t)
+
+
 def _read_times(points: list[dict], first: datetime | None = None) -> list[datetime]:
     """When each chart point's value was really read: a held point (see hold_flat) repeats the
     reading before the gap. first: when the first point was read, if not at its own time."""
@@ -776,7 +790,7 @@ def _same_moments(points: list[dict], bench_points: list[dict]) -> list[dict]:
     times = [datetime.fromisoformat(b["t"]) for b in bench_points]
     out = []
     for p, t in zip(points, _read_times(points)):
-        if (t - times[-1]).total_seconds() > BENCH_STALE_S:
+        if _stale(t, times[-1]):
             break
         i = bisect_right(times, t)
         if i:
@@ -819,7 +833,7 @@ def _one_day(s: Session, cfg: Settings, snap: PieSnapshot, tz: ZoneInfo) -> dict
             continue
         pts = []
         for p, t in zip(points, seen):
-            if (t - times[-1]).total_seconds() > BENCH_STALE_S:
+            if _stale(t, times[-1]):
                 break   # no market prices this late yet
             i = bisect_right(times, t)
             if not i:
